@@ -99,8 +99,10 @@ def lig_verisi_cek(kod: str, sezon_sayisi: int = 3) -> pd.DataFrame:
     return pd.concat(parcalar, ignore_index=True).sort_values("Date").reset_index(drop=True)
 
 
-def fikstur_cek(kod: str | None = None) -> pd.DataFrame:
-    """Yaklaşan maçlar + güncel oranlar (yalnızca ana ligler)."""
+def fikstur_cek(kod: str | None = None, sadece_gelecek: bool = True) -> pd.DataFrame:
+    """Yaklaşan maçlar + güncel oranlar (yalnızca ana ligler).
+    Kaynak dosya haftalık güncellenir ve haftanın OYNANMIŞ maçlarını da içerir;
+    bu yüzden varsayılan olarak bugünden önceki maçlar elenir."""
     resp = requests.get("https://www.football-data.co.uk/fixtures.csv",
                         headers=UA, timeout=TIMEOUT)
     resp.raise_for_status()
@@ -110,4 +112,7 @@ def fikstur_cek(kod: str | None = None) -> pd.DataFrame:
         d["Div"] = ham["Div"]
         if kod:
             d = d[d["Div"] == kod]
-    return d.reset_index(drop=True)
+    if sadece_gelecek and "Date" in d.columns:
+        bugun = pd.Timestamp(datetime.date.today())
+        d = d[d["Date"] >= bugun]
+    return d.sort_values("Date").reset_index(drop=True)
