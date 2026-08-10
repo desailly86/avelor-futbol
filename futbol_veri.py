@@ -62,6 +62,13 @@ def _csv_oku(icerik: bytes) -> pd.DataFrame:
     return pd.DataFrame()
 
 
+def sezon_etiketi(tarih) -> str:
+    """Avrupa sezonu Ağustos'ta başlar: 12.03.2026 → '2025/26'."""
+    t = pd.Timestamp(tarih)
+    yil = t.year if t.month >= 7 else t.year - 1
+    return f"{yil}/{str(yil + 1)[2:]}"
+
+
 def _standartlastir(df: pd.DataFrame) -> pd.DataFrame:
     """Ana ve ek lig dosyalarını ortak kolon adlarına getirir."""
     d = df.rename(columns={"Home": "HomeTeam", "Away": "AwayTeam",
@@ -69,8 +76,12 @@ def _standartlastir(df: pd.DataFrame) -> pd.DataFrame:
                            "PH": "B365H", "PD": "B365D", "PA": "B365A"})
     if "Date" in d.columns:
         d["Date"] = pd.to_datetime(d["Date"], dayfirst=True, errors="coerce")
-    gerekli = ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG"]
-    d = d[[c for c in d.columns if c in gerekli + ["B365H", "B365D", "B365A", "Div", "Season", "Time"]]]
+    if "Date" in d.columns:
+        d["Sezon"] = d["Date"].map(lambda x: sezon_etiketi(x) if pd.notna(x) else "")
+    gerekli = ["Date", "HomeTeam", "AwayTeam", "FTHG", "FTAG", "Sezon"]
+    d = d[[c for c in d.columns if c in gerekli + ["B365H", "B365D", "B365A", "Div", "Time",
+                                                    "HST", "AST", "HC", "AC", "HY", "AY",
+                                                    "HR", "AR", "HTHG", "HTAG"]]]
     return d.dropna(subset=["Date", "HomeTeam", "AwayTeam"])
 
 
@@ -112,7 +123,45 @@ def fikstur_cek(kod: str | None = None, sadece_gelecek: bool = True) -> pd.DataF
         d["Div"] = ham["Div"]
         if kod:
             d = d[d["Div"] == kod]
+    if "Time" in d.columns:
+        d["Saat_TSI"] = d["Time"].map(_saat_tsi)
     if sadece_gelecek and "Date" in d.columns:
         bugun = pd.Timestamp(datetime.date.today())
         d = d[d["Date"] >= bugun]
     return d.sort_values("Date").reset_index(drop=True)
+
+
+# ---------------------------------------------------------------------------
+# GÜNÜN BÜLTENİ (TSİ) — tüm liglerin bugünkü maçları, saate göre sıralı
+# ---------------------------------------------------------------------------
+TSI_FARK_SAAT = 2  # kaynak saatleri Londra (BST) verir; TSİ = +2 (yaz), kışın +3
+
+
+def _saat_tsi(saat_metni) -> str:
+    """'19:45' (kaynak saati) → TSİ karşılığı."""
+    try:
+        s, d = str(saat_metni).strip().split(":")[:2]
+        toplam = (int(s) + TSI_FARK_SAAT) % 24
+        return f"{toplam:02d}:{int(d):02d}"
+    except (ValueError, AttributeError):
+        return ""
+
+
+def gunun_bulteni(sadece_kalan: bool = True, tsi_simdi: datetime.datetime | None = None) -> pd.DataFrame:
+    """Bugün oynanacak TÜM lig maçları, TSİ saatine göre sıralı.
+    sadece_kalan=True → şu andan sonra başlayacak maçlar (oynanmışlar gizlenir)."""
+    d = fikstur_cek(kod=None, sadece_gelecek=False)
+    if d.empty or "Date" not in d.columns:
+        return d
+    bugun = pd.Timestamp(datetime.date.today())
+    d = d[d["Date"] == bugun].copy()
+    if d.empty:
+        return d
+    if "Saat_TSI" not in d.columns and "Time" in d.columns:
+        d["Saat_TSI"] = d["Time"].map(_saat_tsi)
+    d["Lig"] = d.get("Div", "").map(lambda k: TUM_LIGLER.get(k, k))
+    if sadece_kalan and "Saat_TSI" in d.columns:
+        simdi = (tsi_simdi or datetime.datetime.utcnow() + datetime.timedelta(hours=3)).strftime("%H:%M")
+        d = d[d["Saat_TSI"].fillna("") >= simdi]
+    sirala = "Saat_TSI" if "Saat_TSI" in d.columns else "Date"
+    return d.sort_values(sirala).reset_index(drop=True)
