@@ -12,7 +12,8 @@ import streamlit as st
 
 from futbol_motoru import (guc_hesapla, mac_tahmin, value_hesapla,
                            form_ozeti, backtest, en_iyi_uc, MARKET_ETIKET)
-from futbol_veri import TUM_LIGLER, ANA_LIGLER, lig_verisi_cek, fikstur_cek
+from futbol_veri import (TUM_LIGLER, ANA_LIGLER, lig_verisi_cek, fikstur_cek,
+                        gunun_bulteni, sezon_etiketi)
 
 st.set_page_config(page_title="AVELOR Futbol", page_icon="⚽",
                    layout="wide", initial_sidebar_state="expanded")
@@ -50,7 +51,7 @@ h1,h2,h3{ color:var(--murekkep) !important; }
 </style>""", unsafe_allow_html=True)
 
 for anahtar, deger in [("lig_df", None), ("guc", None), ("lig_kod", None),
-                       ("karne", []), ("menu", "Program")]:
+                       ("karne", []), ("menu", "Günün Bülteni")]:
     if anahtar not in st.session_state:
         st.session_state[anahtar] = deger
 
@@ -62,7 +63,7 @@ with st.sidebar:
                            index=list(TUM_LIGLER.keys()).index("T1"))
     sezon_sayisi = st.slider("Model kaç sezona baksın", 1, 5, 3)
     st.write("---")
-    for ad, ikon in [("Program", "📡"), ("Takım Güçleri", "🔬"),
+    for ad, ikon in [("Günün Bülteni", "🗓️"), ("Program", "📡"), ("Takım Güçleri", "🔬"),
                      ("Elle Tahmin", "🎯"), ("Backtest", "🧪"), ("Karne", "📈")]:
         if st.button(f"{ikon} {ad}", use_container_width=True,
                      type="primary" if st.session_state["menu"] == ad else "secondary"):
@@ -86,8 +87,14 @@ def model_kur():
                 return
             st.session_state.update(lig_df=veri, guc=guc_hesapla(veri), lig_kod=lig_kod)
             oynanmis = veri.dropna(subset=["FTHG"])
+            g = st.session_state["guc"]
             st.success(f"✅ {len(oynanmis)} maçla model kuruldu "
                        f"({oynanmis['Date'].min():%d.%m.%Y} → {oynanmis['Date'].max():%d.%m.%Y})")
+            if g.get("aktif_sezon"):
+                st.info(f"📅 Aktif sezon: **{g['aktif_sezon']}** — bu sezonun "
+                        f"{g['aktif_sezon_mac']} maçı {int(1.8*100-100)}% fazla ağırlıkla sayılıyor "
+                        "(transfer/kadro değişimi gerçeği). Sezon başındaysa veri az olacağı için "
+                        "geçen sezon destek verir; ilk haftalarda tahminlere temkinli yaklaşın.")
         except Exception as e:
             st.error(f"Model kurulamadı: {e}")
 
@@ -148,7 +155,39 @@ def eksik_paneli(ev, dep, anahtar):
     return {"ev_hucum": eh, "ev_savunma": es, "dep_hucum": dh, "dep_savunma": ds}
 
 
-if menu == "Program":
+if menu == "Günün Bülteni":
+    st.markdown("# 🗓️ Günün Bülteni")
+    simdi = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+    st.caption(f"Şu an TSİ **{simdi:%H:%M}** · {simdi:%d.%m.%Y} — tüm liglerin bugünkü maçları, "
+               "başlama saatine göre sıralı. Varsayılan: henüz başlamamış maçlar.")
+    c1, c2 = st.columns([1, 2])
+    sadece_kalan = c1.toggle("Sadece kalan maçlar", value=True)
+    if c2.button("🗓️ Günün maçlarını getir", type="primary", use_container_width=True):
+        with st.spinner("Tüm liglerin bugünkü programı çekiliyor…"):
+            try:
+                st.session_state["bulten"] = gunun_bulteni(sadece_kalan=sadece_kalan,
+                                                           tsi_simdi=simdi)
+            except Exception as e:
+                st.error(f"Bülten çekilemedi: {e}")
+    b = st.session_state.get("bulten")
+    if b is not None:
+        if b.empty:
+            st.info("Bugün için (kalan) maç bulunamadı. Kaynak fikstür dosyası haftalık "
+                    "güncellenir; hafta ortasında güncellenmemiş olabilir.")
+        else:
+            st.markdown(f"**{len(b)} maç**")
+            for _, m in b.iterrows():
+                oran = ""
+                if pd.notna(m.get("B365H")):
+                    oran = f" · oranlar {m['B365H']} / {m['B365D']} / {m['B365A']}"
+                st.markdown(f"<div class='mac' style='padding:8px 14px'>"
+                            f"<b>{m.get('Saat_TSI','--:--')}</b> &nbsp; {m['HomeTeam']} — {m['AwayTeam']}"
+                            f"<span class='etiket'> &nbsp; {m.get('Lig','')}{oran}</span></div>",
+                            unsafe_allow_html=True)
+            st.caption("Tahmin için: soldan ilgili ligi seçip **Program** ekranından modeli kurun, "
+                       "ardından maç kartlarında cesur öneriler görünür.")
+
+elif menu == "Program":
     st.markdown("# 📡 Program & Tahmin")
     st.caption("1) Modeli kur → 2) Yaklaşan maçları getir. Ana liglerde güncel oranlar "
                "fikstürle birlikte gelir ve value otomatik işaretlenir.")
@@ -216,12 +255,13 @@ elif menu == "Elle Tahmin":
         oranlar = {"1": o1.number_input("Oran 1", 1.0, 100.0, 1.0, 0.05),
                    "X": ox.number_input("Oran X", 1.0, 100.0, 1.0, 0.05),
                    "2": o2.number_input("Oran 2", 1.0, 100.0, 1.0, 0.05)}
+        tarafsiz = st.checkbox("⚪ Tarafsız saha / hazırlık maçı (ev avantajı yarıya iner)")
         eksik = eksik_paneli(ev, dep, "elle")
         if st.button("Analiz et", type="primary"):
             if ev == dep:
                 st.warning("İki farklı takım seçin.")
             else:
-                t = mac_tahmin(guc, ev, dep, eksikler=eksik)
+                t = mac_tahmin(guc, ev, dep, eksikler=eksik, tarafsiz=tarafsiz)
                 mac_karti(ev, dep, t, {k: v for k, v in oranlar.items() if v > 1.01}, anahtar="elle",
                           bazlar=guc.get("bazlar"))
                 fe, fd = form_ozeti(df, ev), form_ozeti(df, dep)
