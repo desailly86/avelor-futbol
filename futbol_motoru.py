@@ -158,6 +158,50 @@ def guc_hesapla(df: pd.DataFrame, referans=None) -> dict:
             "bazlar": {k: round(v, 1) for k, v in bazlar.items()}}
 
 
+
+# ---------------------------------------------------------------------------
+# ELO REYTİNGİ — Poisson'dan bağımsız ikinci görüş (çelişki = temkin sinyali)
+# ---------------------------------------------------------------------------
+ELO_K = 20.0
+ELO_EV_AVANTAJ = 60.0
+
+def elo_hesapla(df: pd.DataFrame) -> dict:
+    """Kronolojik Elo: her maç sonucu takım reytinglerini günceller.
+    Dönüş: {takim: elo}. Yeni sezonda hafif ortalamaya çekilir (sezon kırılımı)."""
+    d = df.dropna(subset=["FTHG", "FTAG"]).sort_values("Date")
+    elo, son_sezon = {}, None
+    for _, m in d.iterrows():
+        sezon = m.get("Sezon", "")
+        if son_sezon and sezon != son_sezon:  # sezon başı: %25 ortalamaya çek (transfer/değişim)
+            ort = np.mean(list(elo.values())) if elo else 1500
+            for t in elo:
+                elo[t] = 0.75 * elo[t] + 0.25 * ort
+        son_sezon = sezon
+        e, d_ = m["HomeTeam"], m["AwayTeam"]
+        re_, rd = elo.get(e, 1500.0), elo.get(d_, 1500.0)
+        bek_e = 1 / (1 + 10 ** (-((re_ + ELO_EV_AVANTAJ) - rd) / 400))
+        sonuc = 1.0 if m["FTHG"] > m["FTAG"] else (0.5 if m["FTHG"] == m["FTAG"] else 0.0)
+        fark = abs(m["FTHG"] - m["FTAG"])
+        carpan = ELO_K * (1 + 0.5 * min(fark - 1, 3) if fark > 1 else 1) / (2 if fark <= 1 else 1)
+        elo[e] = re_ + carpan * (sonuc - bek_e)
+        elo[d_] = rd + carpan * ((1 - sonuc) - (1 - bek_e))
+    return elo
+
+
+def elo_1x2(elo: dict, ev: str, dep: str) -> dict | None:
+    """Elo'dan bağımsız 1X2 olasılığı (çift kontrol için)."""
+    if ev not in elo or dep not in elo:
+        return None
+    fark = (elo[ev] + ELO_EV_AVANTAJ) - elo[dep]
+    p_ev = 1 / (1 + 10 ** (-fark / 400))
+    p_dep = 1 / (1 + 10 ** (fark / 400))
+    p_ber = 0.27 - abs(p_ev - p_dep) * 0.15  # basit beraberlik payı
+    p_ber = max(0.14, p_ber)
+    olcek = (1 - p_ber) / (p_ev + p_dep)
+    return {"1": round(p_ev * olcek * 100, 1), "X": round(p_ber * 100, 1),
+            "2": round(p_dep * olcek * 100, 1)}
+
+
 def _dc(x, y, lh, la):
     if x == 0 and y == 0: return 1 - lh * la * RHO
     if x == 0 and y == 1: return 1 + lh * RHO
@@ -175,7 +219,8 @@ def _poisson_ustu(lam, esik):
 
 
 def mac_tahmin(guc: dict, ev: str, dep: str, mac_tarihi=None,
-               eksikler: dict | None = None, tarafsiz: bool = False) -> dict | None:
+               eksikler: dict | None = None, tarafsiz: bool = False,
+               elo: dict | None = None) -> dict | None:
     """eksikler: {'ev_hucum':0-3,'ev_savunma':0-3,'dep_hucum':0-3,'dep_savunma':0-3}"""
     te, td = guc["takimlar"].get(ev), guc["takimlar"].get(dep)
     if not te or not td:
@@ -245,6 +290,11 @@ def mac_tahmin(guc: dict, ev: str, dep: str, mac_tarihi=None,
          "skor": skorlar[0][1], "notlar": notlar,
          "ev_mac": te["mac"], "dep_mac": td["mac"]}
 
+    # Kalibrasyon: aşırı özgüveni yumuşat (1X2, çifte şans, gol, KG marketleri)
+    for _k in ("1", "X", "2", "1X", "12", "X2", "ust15", "alt15", "ust25", "alt25",
+               "ust35", "alt35", "kg_var", "kg_yok", "iy_ust05", "iy_ust15"):
+        if _k in t:
+            t[_k] = round(_kalibre(t[_k]), 1)
     if guc.get("lig_korner"):
         ke = (te.get("ev") or {}).get("korner"); kd = (td.get("dep") or {}).get("korner")
         if ke is not None and kd is not None:
@@ -259,6 +309,15 @@ def mac_tahmin(guc: dict, ev: str, dep: str, mac_tarihi=None,
             for esik in (3, 4):
                 t[f"kart_ust{esik}5"] = round(float(_poisson_ustu(lam_c, esik)) * 100, 1)
             t["kart_beklenti"] = round(lam_c, 1)
+    # ELO İKİNCİ GÖRÜŞ: iki bağımsız model 1X2'de aynı favoriyi mi gösteriyor?
+    if elo:
+        e = elo_1x2(elo, ev, dep)
+        if e:
+            poisson_fav = max(("1", "X", "2"), key=lambda s: t[s])
+            elo_fav = max(("1", "X", "2"), key=lambda s: e[s])
+            t["elo_1"], t["elo_X"], t["elo_2"] = e["1"], e["X"], e["2"]
+            t["mutabakat"] = poisson_fav == elo_fav
+            t["guven"] = "YÜKSEK" if t["mutabakat"] else "TEMKİN"
     return t
 
 
@@ -291,8 +350,11 @@ def en_iyi_uc(t: dict, bazlar: dict | None = None,
     zorlama öneri üretilmez."""
     bazlar = bazlar or {}
     # Backtest kırılımının güvenilmez bulduğu uç marketler önerilmez (tabloda kalır):
-    YASAKLI = {"kart_ust45", "korner_ust105", "ust35", "iy_ust15"}
-    OZEL_ESIK = {"kg_var": 56.0, "kg_yok": 56.0, "korner_ust95": 55.0}
+    # Gerçek Süper Lig backtesti (476 maç) sonucu güvenilmez bulunanlar çıkarıldı:
+    #   korner_ust95 %47.5 (şans altı), kg_var %45 (şans altı), korner_ust105/kart_ust45 zaten zayıf.
+    # Güçlü çıkanlar korunur: 2.5 Üst %69, Çifte Şans %82, 1.5 Üst %81, Kart 3.5 Üst %67.
+    YASAKLI = {"kart_ust45", "korner_ust105", "korner_ust95", "ust35", "iy_ust15", "kg_var"}
+    OZEL_ESIK = {"kg_yok": 54.0, "korner_ust85": 58.0, "alt25": 56.0}
     adaylar = []
     for k in MARKET_ETIKET:
         if k in YASAKLI or k not in t or not isinstance(t[k], (int, float)):
@@ -315,6 +377,13 @@ def en_iyi_uc(t: dict, bazlar: dict | None = None,
         if len(secim) == 3:
             break
     return secim
+
+
+
+def _kalibre(p, guc=0.82):
+    """Aşırı özgüveni yumuşatır: olasılığı %50'ye doğru hafif çeker.
+    Backtest kalibrasyonu modelin fazla iddialı olduğunu gösterdi (guc<1 düzeltir)."""
+    return 50.0 + (p - 50.0) * guc
 
 
 def value_hesapla(olasilik_yuzde: float, oran: float) -> dict:
@@ -343,21 +412,36 @@ def backtest(df: pd.DataFrame, minimum_mac: int = 120) -> dict:
     d = df.dropna(subset=["FTHG", "FTAG"]).sort_values("Date").reset_index(drop=True)
     r = {"mac": 0, "model_1x2": 0, "piyasa_1x2": 0, "au25": 0, "kg": 0,
          "log_kayip": 0.0, "value_bahis": 0, "value_kar": 0.0,
-         "oneri": 0, "oneri_tutan": 0}
+         "oneri": 0, "oneri_tutan": 0, "mutabakat_mac": 0, "mutabakat_isabet": 0,
+         "kalibrasyon": {}}
+    kalib = {b: [0, 0] for b in range(50, 100, 10)}  # %50-60, 60-70, ... kovaları
+    elo = {}
     for i in range(minimum_mac, len(d)):
         m = d.iloc[i]
         try:
             guc = guc_hesapla(d.iloc[:i], referans=m["Date"])
         except ValueError:
             continue
-        t = mac_tahmin(guc, m["HomeTeam"], m["AwayTeam"], mac_tarihi=m["Date"])
+        elo = elo_hesapla(d.iloc[:i]) if i % 5 == 0 else elo  # her 5 maçta bir güncelle (hız)
+        t = mac_tahmin(guc, m["HomeTeam"], m["AwayTeam"], mac_tarihi=m["Date"], elo=elo)
         if not t:
             continue
         r["mac"] += 1
         gercek = "1" if m["FTHG"] > m["FTAG"] else ("X" if m["FTHG"] == m["FTAG"] else "2")
         toplam = m["FTHG"] + m["FTAG"]
         kg_gercek = m["FTHG"] > 0 and m["FTAG"] > 0
-        r["model_1x2"] += max(("1", "X", "2"), key=lambda s: t[s]) == gercek
+        en_iyi_1x2 = max(("1", "X", "2"), key=lambda s: t[s])
+        r["model_1x2"] += en_iyi_1x2 == gercek
+        p_secim = t[en_iyi_1x2]
+        for esik in kalib:
+            if esik <= p_secim < esik + 10:
+                kalib[esik][0] += 1
+                kalib[esik][1] += en_iyi_1x2 == gercek
+                break
+        if t.get("mutabakat") is not None:
+            r["mutabakat_mac"] += 1 if t["mutabakat"] else 0
+            if t["mutabakat"]:
+                r["mutabakat_isabet"] += en_iyi_1x2 == gercek
         r["log_kayip"] += -math.log(max(t[gercek] / 100.0, 1e-9))
         r["au25"] += (t["ust25"] >= 50) == (toplam >= 3)
         r["kg"] += (t["kg_var"] >= 50) == kg_gercek
@@ -399,4 +483,8 @@ def backtest(df: pd.DataFrame, minimum_mac: int = 120) -> dict:
             "value_roi_%": round(r["value_kar"] / max(r["value_bahis"], 1) * 100, 1),
             "market_kirilim": {m: {"oneri": v[0], "isabet_%": round(v[1] / v[0] * 100, 1)}
                                for m, v in sorted(r.get("market_kirilim", {}).items(),
-                                                  key=lambda x: -x[1][0])}}
+                                                  key=lambda x: -x[1][0])},
+            "kalibrasyon": {f"%{b}-{b+10}": {"mac": v[0], "gercek_%": round(v[1] / v[0] * 100, 1)}
+                            for b, v in kalib.items() if v[0] >= 5},
+            "mutabakat_isabet_%": round(r["mutabakat_isabet"] / max(r["mutabakat_mac"], 1) * 100, 1),
+            "mutabakat_mac": r["mutabakat_mac"]}
