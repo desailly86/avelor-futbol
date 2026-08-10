@@ -160,7 +160,10 @@ if menu == "Program":
                 try:
                     fx = fikstur_cek(lig_kod)
                     if fx.empty:
-                        st.warning("Bu lig için yaklaşan maç bulunamadı (sezon arası olabilir).")
+                        st.warning("Bugünden ileri tarihli maç bulunamadı. Kaynak fikstür dosyası "
+                                   "haftalık güncellenir; hafta sonu maçları genelde Salı-Çarşamba "
+                                   "dosyaya düşer. O güne kadar **Elle Tahmin** ekranından istediğin "
+                                   "maçı analiz edebilirsin.")
                     else:
                         st.session_state["fikstur"] = fx
                 except Exception as e:
