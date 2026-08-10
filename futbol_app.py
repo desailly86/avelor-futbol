@@ -92,19 +92,27 @@ def model_kur():
             st.error(f"Model kurulamadı: {e}")
 
 
-def mac_karti(ev, dep, t, oranlar=None, tarih="", anahtar=""):
-    oneriler = en_iyi_uc(t)
+def mac_karti(ev, dep, t, oranlar=None, tarih="", anahtar="", bazlar=None):
+    oneriler = en_iyi_uc(t, bazlar)
     madalya = ["🥇", "🥈", "🥉"]
     oneri_html = "".join(
-        f"<div><div class='etiket'>{madalya[i]} ÖNERİ {i+1}</div>"
+        f"<div><div class='etiket'>{madalya[i]} CESUR ÖNERİ</div>"
         f"<div class='deger'>{o['market']}</div>"
-        f"<div class='etiket'>%{o['olasilik']}</div></div>"
-        for i, o in enumerate(oneriler)) or "<div class='etiket'>%55 güveni aşan öneri yok — zorlama tahmin verilmez</div>"
+        f"<div class='etiket'>%{o['olasilik']} · lig tabanı %{o['baz']} · <b>kenar +{o['kenar']}</b></div></div>"
+        for i, o in enumerate(oneriler)) or \
+        "<div class='etiket'>Lig tabanından yeterince sapan iddia yok — zorlama öneri verilmez</div>"
+    # Halkın ana çizgisi her kartta sabit: 2.5 Alt/Üst
+    au_secim = "Üst" if t["ust25"] >= 50 else "Alt"
+    au_p = t["ust25"] if au_secim == "Üst" else t["alt25"]
+    au_baz = (bazlar or {}).get("ust25" if au_secim == "Üst" else "alt25", 50)
+    oneri_html += (f"<div style='border-left:1px solid var(--cizgi);padding-left:8px'>"
+                   f"<div class='etiket'>⚖️ 2.5 ÇİZGİSİ</div><div class='deger'>{au_secim} 2.5</div>"
+                   f"<div class='etiket'>%{au_p} · taban %{au_baz}</div></div>")
     notlar = " · ".join(t.get("notlar", []))
     st.markdown(f"<div class='mac'><div class='mac-ust'><b>{ev} — {dep}</b>"
                 f"<span class='etiket'>{tarih} · xG {t['lam_ev']}-{t['lam_dep']} · skor {t['skor']}"
                 f"{' · ' + notlar if notlar else ''}</span></div>"
-                f"<div class='olasilik' style='grid-template-columns:repeat(3,1fr)'>{oneri_html}</div></div>",
+                f"<div class='olasilik' style='grid-template-columns:repeat(4,1fr)'>{oneri_html}</div></div>",
                 unsafe_allow_html=True)
     with st.expander(f"Tüm marketler — {ev} vs {dep}"):
         satirlar = []
@@ -166,7 +174,8 @@ if menu == "Program":
                 oranlar = {"1": m.get("B365H"), "X": m.get("B365D"), "2": m.get("B365A")}
                 oranlar = {k: float(v) for k, v in oranlar.items() if pd.notna(v)}
                 mac_karti(m["HomeTeam"], m["AwayTeam"], t, oranlar,
-                          m["Date"].strftime("%d.%m.%Y") if pd.notna(m.get("Date")) else "", f"f{fi}")
+                          m["Date"].strftime("%d.%m.%Y") if pd.notna(m.get("Date")) else "", f"f{fi}",
+                          bazlar=guc.get("bazlar"))
         else:
             st.info("Bu ek ligde oranlı fikstür servisi yok — **Elle Tahmin** ekranından "
                     "iki takımı seçip (istersen oranları da girip) analiz alabilirsin.")
@@ -210,7 +219,8 @@ elif menu == "Elle Tahmin":
                 st.warning("İki farklı takım seçin.")
             else:
                 t = mac_tahmin(guc, ev, dep, eksikler=eksik)
-                mac_karti(ev, dep, t, {k: v for k, v in oranlar.items() if v > 1.01}, anahtar="elle")
+                mac_karti(ev, dep, t, {k: v for k, v in oranlar.items() if v > 1.01}, anahtar="elle",
+                          bazlar=guc.get("bazlar"))
                 fe, fd = form_ozeti(df, ev), form_ozeti(df, dep)
                 st.caption(f"Form — {ev}: {fe['dizi']} ({fe['puan']} puan) · "
                            f"{dep}: {fd['dizi']} ({fd['puan']} puan)")
@@ -243,6 +253,14 @@ elif menu == "Backtest":
         c7, c8 = st.columns(2)
         c7.metric("Value bahis sayısı", rapor["value_bahis"])
         c8.metric("Value stratejisi ROI", f"%{rapor['value_roi_%']}")
+        if rapor.get("market_kirilim"):
+            st.markdown("### Öneri isabetinin market kırılımı")
+            st.caption("Hangi market türüne güvenilir, hangisinden uzak durulur — kanıtı bu tablo. "
+                       "İsabeti düşük çıkan marketleri birlikte budarız.")
+            st.dataframe(pd.DataFrame([
+                {"Market": m, "Öneri sayısı": v["oneri"], "İsabet %": v["isabet_%"]}
+                for m, v in rapor["market_kirilim"].items()]),
+                hide_index=True, use_container_width=True)
         st.caption(f"Ortalama log-kayıp: {rapor['ort_log_kayip']} (düşük iyi). "
                    "Model piyasaya yaklaşıyorsa iyi kalibre demektir; geçmek nadirdir.")
 
