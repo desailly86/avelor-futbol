@@ -93,6 +93,9 @@ def guc_hesapla(df: pd.DataFrame, referans=None) -> dict:
                 r_sut = _agirlikli_ort(d.loc[maske, rakip_sut_kol], wt)
                 if r_sut is not None:
                     savunma = (1 - SUT_HARMAN) * savunma + SUT_HARMAN * (r_sut * donusum / lig_ort)
+            guven = wt.sum() / (wt.sum() + 4.0)  # az maç → 1.0'a (lig ort.) büzül
+            hucum = 1.0 + (hucum - 1.0) * guven
+            savunma = 1.0 + (savunma - 1.0) * guven
             return {"hucum": hucum, "savunma": savunma, "mac": int(maske.sum()),
                     "korner": _agirlikli_ort(d.loc[maske, korner_kol], wt) if korner_var else None,
                     "kart": _agirlikli_ort(d.loc[maske, kart_kol], wt) if kart_var else None}
@@ -107,8 +110,32 @@ def guc_hesapla(df: pd.DataFrame, referans=None) -> dict:
         takimlar[takim] = {"ev": ev_p, "dep": dep_p, "genel": genel,
                            "mac": int(ev.sum() + dep.sum()), "son_mac": son_tarih,
                            "hucum": genel["hucum"], "savunma": genel["savunma"]}
+    toplam_gol = d["FTHG"] + d["FTAG"]
+    bazlar = {"1": float((d["FTHG"] > d["FTAG"]).mean() * 100),
+              "X": float((d["FTHG"] == d["FTAG"]).mean() * 100),
+              "2": float((d["FTHG"] < d["FTAG"]).mean() * 100),
+              "ust15": float((toplam_gol > 1).mean() * 100),
+              "ust25": float((toplam_gol > 2).mean() * 100),
+              "ust35": float((toplam_gol > 3).mean() * 100),
+              "kg_var": float(((d["FTHG"] > 0) & (d["FTAG"] > 0)).mean() * 100)}
+    bazlar["alt15"] = 100 - bazlar["ust15"]; bazlar["alt25"] = 100 - bazlar["ust25"]
+    bazlar["alt35"] = 100 - bazlar["ust35"]; bazlar["kg_yok"] = 100 - bazlar["kg_var"]
+    bazlar["1X"] = bazlar["1"] + bazlar["X"]; bazlar["12"] = bazlar["1"] + bazlar["2"]
+    bazlar["X2"] = bazlar["X"] + bazlar["2"]
+    if "HTHG" in d.columns and d["HTHG"].notna().sum() > len(d) * 0.5:
+        iy = d["HTHG"].fillna(0) + d["HTAG"].fillna(0)
+        bazlar["iy_ust05"] = float((iy > 0).mean() * 100)
+        bazlar["iy_ust15"] = float((iy > 1).mean() * 100)
+    if korner_var:
+        kt = (d["HC"] + d["AC"]).dropna()
+        for esik in (8, 9, 10):
+            bazlar[f"korner_ust{esik}5"] = float((kt > esik).mean() * 100)
+    if kart_var:
+        for esik in (3, 4):
+            bazlar[f"kart_ust{esik}5"] = float((kartlar > esik).mean() * 100)
     return {"takimlar": takimlar, "ev_carpan": ev_gol / lig_ort, "dep_carpan": dep_gol / lig_ort,
-            "lig_ort": lig_ort, "lig_korner": lig_korner, "lig_kart": lig_kart}
+            "lig_ort": lig_ort, "lig_korner": lig_korner, "lig_kart": lig_kart,
+            "bazlar": {k: round(v, 1) for k, v in bazlar.items()}}
 
 
 def _dc(x, y, lh, la):
@@ -226,19 +253,37 @@ MARKET_GRUP = {  # aynı gruptan en fazla 1 öneri (çeşitlilik kuralı)
 }
 
 
-def en_iyi_uc(t: dict, esik: float = 55.0) -> list[dict]:
-    """Maçın tüm marketlerinden güven + çeşitlilik kuralıyla ilk 3 öneri.
-    Kural: olasılığa göre sırala; aynı market grubundan (sonuç/gol/KG/İY/korner/kart)
-    yalnızca 1 öneri; %55 altı öneri listeye giremez (zorlama öneri yok)."""
-    adaylar = [(t[k], k) for k in MARKET_ETIKET if k in t and isinstance(t[k], (int, float))]
+def en_iyi_uc(t: dict, bazlar: dict | None = None,
+              min_olasilik: float = 50.0, min_kenar: float = 5.0) -> list[dict]:
+    """CESUR ÖNERİ SEÇİCİ: ham olasılıkla değil, modelin LİG ORTALAMASINDAN
+    ne kadar saptığıyla (kenar) sıralar. 'Çifte şans %92' gibi herkesin
+    bildiği kolay tahminler kenarı düşük olduğu için elenir; '2.5 Üst %64
+    (lig tabanı %52 → kenar +12)' gibi gerçek iddialar öne çıkar.
+    Kurallar: olasılık ≥ %50 (yazı-turadan iyi olmalı), kenar ≥ min_kenar,
+    aynı market grubundan tek öneri. Şartları aşan yoksa liste kısa kalır —
+    zorlama öneri üretilmez."""
+    bazlar = bazlar or {}
+    # Backtest kırılımının güvenilmez bulduğu uç marketler önerilmez (tabloda kalır):
+    YASAKLI = {"kart_ust45", "korner_ust105", "ust35", "iy_ust15"}
+    OZEL_ESIK = {"kg_var": 56.0, "kg_yok": 56.0, "korner_ust95": 55.0}
+    adaylar = []
+    for k in MARKET_ETIKET:
+        if k in YASAKLI or k not in t or not isinstance(t[k], (int, float)):
+            continue
+        p = float(t[k])
+        baz = float(bazlar.get(k, 50.0))
+        kenar = p - baz
+        if p >= max(min_olasilik, OZEL_ESIK.get(k, 0)) and kenar >= min_kenar:
+            adaylar.append((kenar, p, k))
     adaylar.sort(reverse=True)
     secim, gruplar = [], set()
-    for p, k in adaylar:
+    for kenar, p, k in adaylar:
         g = MARKET_GRUP[k]
-        if p < esik or g in gruplar:
+        if g in gruplar:
             continue
-        # Çifte şansın bilgi değeri düşükse (zaten bariz) tekli sonucu tercih et
-        secim.append({"market": MARKET_ETIKET[k], "kod": k, "olasilik": p})
+        secim.append({"market": MARKET_ETIKET[k], "kod": k,
+                      "olasilik": round(p, 1), "kenar": round(kenar, 1),
+                      "baz": round(float(bazlar.get(k, 50.0)), 1)})
         gruplar.add(g)
         if len(secim) == 3:
             break
@@ -290,7 +335,7 @@ def backtest(df: pd.DataFrame, minimum_mac: int = 120) -> dict:
         r["au25"] += (t["ust25"] >= 50) == (toplam >= 3)
         r["kg"] += (t["kg_var"] >= 50) == kg_gercek
         # En iyi 3 önerinin gerçekleşme testi
-        for o in en_iyi_uc(t):
+        for o in en_iyi_uc(t, guc.get("bazlar")):
             r["oneri"] += 1
             k = o["kod"]
             tutan = {"1": gercek == "1", "X": gercek == "X", "2": gercek == "2",
@@ -307,6 +352,8 @@ def backtest(df: pd.DataFrame, minimum_mac: int = 120) -> dict:
                      "kart_ust45": pd.notna(m.get("HY")) and (m["HY"] + m["AY"]) > 4,
                      }.get(k, False)
             r["oneri_tutan"] += bool(tutan)
+            mk = r.setdefault("market_kirilim", {}).setdefault(o["market"], [0, 0])
+            mk[0] += 1; mk[1] += bool(tutan)
         oranlar = {s: m.get(f"B365{h}") for s, h in (("1", "H"), ("X", "D"), ("2", "A"))}
         if all(pd.notna(o) and o and o > 1 for o in oranlar.values()):
             r["piyasa_1x2"] += min(oranlar, key=oranlar.get) == gercek
@@ -322,4 +369,7 @@ def backtest(df: pd.DataFrame, minimum_mac: int = 120) -> dict:
             "en_iyi3_isabet_%": round(r["oneri_tutan"] / max(r["oneri"], 1) * 100, 1),
             "en_iyi3_oneri": r["oneri"],
             "value_bahis": r["value_bahis"],
-            "value_roi_%": round(r["value_kar"] / max(r["value_bahis"], 1) * 100, 1)}
+            "value_roi_%": round(r["value_kar"] / max(r["value_bahis"], 1) * 100, 1),
+            "market_kirilim": {m: {"oneri": v[0], "isabet_%": round(v[1] / v[0] * 100, 1)}
+                               for m, v in sorted(r.get("market_kirilim", {}).items(),
+                                                  key=lambda x: -x[1][0])}}
