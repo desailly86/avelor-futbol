@@ -25,6 +25,8 @@ import numpy as np
 import pandas as pd
 
 YARI_OMUR_GUN = 240.0
+YENI_SEZON_KATSAYI = 1.8   # bu sezonun maçları: transfer/kadro değişimi gerçeğini yansıtır
+TARAFSIZ_EV_PAYI = 0.5     # hazırlık/tarafsız saha: ev avantajı yarıya iner
 RHO = -0.10
 MAX_GOL = 8
 SUT_HARMAN = 0.30          # hücum gücünde isabetli şut payı
@@ -55,8 +57,25 @@ def guc_hesapla(df: pd.DataFrame, referans=None) -> dict:
         raise ValueError(f"Model için en az 30 oynanmış maç gerekir (elde {len(d)}).")
     referans = referans or d["Date"].max()
     w = _agirliklar(d["Date"], referans)
-    ev_gol = float(np.average(d["FTHG"], weights=w))
-    dep_gol = float(np.average(d["FTAG"], weights=w))
+    # SEZON KIRILIMI: içinde bulunulan sezonun maçları daha ağır sayılır; eski
+    # sezonlar yalnızca destek verir (transferler kadroyu değiştirir).
+    if "Sezon" in d.columns and d["Sezon"].notna().any():
+        aktif_sezon = d.loc[d["Date"].idxmax(), "Sezon"]
+        w = w * np.where(d["Sezon"].to_numpy() == aktif_sezon, YENI_SEZON_KATSAYI, 1.0)
+        aktif_mac = int((d["Sezon"] == aktif_sezon).sum())
+    else:
+        aktif_sezon, aktif_mac = "", 0
+    # Hazırlık/tarafsız saha maçları ev avantajı ortalamasını bozmasın
+    if "Tarafsiz" in d.columns:
+        ev_maske = ~d["Tarafsiz"].fillna(False).to_numpy(dtype=bool)
+    else:
+        ev_maske = np.ones(len(d), dtype=bool)
+    if ev_maske.sum() >= 10:  # ev avantajı yalnızca gerçek ev sahipli maçlardan
+        ev_gol = float(np.average(d.loc[ev_maske, "FTHG"], weights=w[ev_maske]))
+        dep_gol = float(np.average(d.loc[ev_maske, "FTAG"], weights=w[ev_maske]))
+    else:
+        ev_gol = float(np.average(d["FTHG"], weights=w))
+        dep_gol = float(np.average(d["FTAG"], weights=w))
     lig_ort = (ev_gol + dep_gol) / 2.0
     sut_var = "HST" in d.columns and d["HST"].notna().sum() > len(d) * 0.5
     if sut_var:
@@ -135,6 +154,7 @@ def guc_hesapla(df: pd.DataFrame, referans=None) -> dict:
             bazlar[f"kart_ust{esik}5"] = float((kartlar > esik).mean() * 100)
     return {"takimlar": takimlar, "ev_carpan": ev_gol / lig_ort, "dep_carpan": dep_gol / lig_ort,
             "lig_ort": lig_ort, "lig_korner": lig_korner, "lig_kart": lig_kart,
+            "aktif_sezon": aktif_sezon, "aktif_sezon_mac": aktif_mac,
             "bazlar": {k: round(v, 1) for k, v in bazlar.items()}}
 
 
@@ -155,7 +175,7 @@ def _poisson_ustu(lam, esik):
 
 
 def mac_tahmin(guc: dict, ev: str, dep: str, mac_tarihi=None,
-               eksikler: dict | None = None) -> dict | None:
+               eksikler: dict | None = None, tarafsiz: bool = False) -> dict | None:
     """eksikler: {'ev_hucum':0-3,'ev_savunma':0-3,'dep_hucum':0-3,'dep_savunma':0-3}"""
     te, td = guc["takimlar"].get(ev), guc["takimlar"].get(dep)
     if not te or not td:
@@ -165,8 +185,13 @@ def mac_tahmin(guc: dict, ev: str, dep: str, mac_tarihi=None,
     dep_hucum = (td["dep"] or td)["hucum"] if td.get("dep") else td["genel"]["hucum"]
     dep_savunma = (td["dep"] or td)["savunma"] if td.get("dep") else td["genel"]["savunma"]
 
-    lam_ev = guc["lig_ort"] * guc["ev_carpan"] * ev_hucum * dep_savunma
-    lam_dep = guc["lig_ort"] * guc["dep_carpan"] * dep_hucum * ev_savunma
+    ev_c, dep_c = guc["ev_carpan"], guc["dep_carpan"]
+    if tarafsiz:  # hazırlık maçı / tarafsız saha: ev avantajı yarıya iner
+        orta = (ev_c + dep_c) / 2.0
+        ev_c = orta + (ev_c - orta) * TARAFSIZ_EV_PAYI
+        dep_c = orta + (dep_c - orta) * TARAFSIZ_EV_PAYI
+    lam_ev = guc["lig_ort"] * ev_c * ev_hucum * dep_savunma
+    lam_dep = guc["lig_ort"] * dep_c * dep_hucum * ev_savunma
 
     notlar = []
     if mac_tarihi is not None:
@@ -184,6 +209,8 @@ def mac_tahmin(guc: dict, ev: str, dep: str, mac_tarihi=None,
     lam_dep *= EKSIK_SAVUNMA_ETKI ** e.get("ev_savunma", 0)
     if any(e.values()):
         notlar.append("eksik ayarı uygulandı")
+    if tarafsiz:
+        notlar.append("tarafsız saha")
     lam_ev = max(0.05, min(6.0, lam_ev)); lam_dep = max(0.05, min(6.0, lam_dep))
 
     p_ev = [math.exp(-lam_ev) * lam_ev ** i / math.factorial(i) for i in range(MAX_GOL + 1)]
