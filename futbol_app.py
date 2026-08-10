@@ -10,8 +10,8 @@ import requests
 import pandas as pd
 import streamlit as st
 
-from futbol_motoru import (guc_hesapla, mac_tahmin, value_hesapla,
-                           form_ozeti, backtest, en_iyi_uc, MARKET_ETIKET)
+from futbol_motoru import (guc_hesapla, mac_tahmin, value_hesapla, form_ozeti,
+                           backtest, en_iyi_uc, MARKET_ETIKET, elo_hesapla)
 from futbol_veri import (TUM_LIGLER, ANA_LIGLER, lig_verisi_cek, fikstur_cek,
                         gunun_bulteni, sezon_etiketi)
 
@@ -50,7 +50,7 @@ h1,h2,h3{ color:var(--murekkep) !important; }
 .bar-ic{ background:var(--murekkep); height:100%; }
 </style>""", unsafe_allow_html=True)
 
-for anahtar, deger in [("lig_df", None), ("guc", None), ("lig_kod", None),
+for anahtar, deger in [("lig_df", None), ("guc", None), ("elo", None), ("lig_kod", None),
                        ("karne", []), ("menu", "Günün Bülteni")]:
     if anahtar not in st.session_state:
         st.session_state[anahtar] = deger
@@ -85,7 +85,8 @@ def model_kur():
             if veri.empty:
                 st.error("Veri indirilemedi — lig kodu için dosya bulunamadı ya da site erişilemez.")
                 return
-            st.session_state.update(lig_df=veri, guc=guc_hesapla(veri), lig_kod=lig_kod)
+            st.session_state.update(lig_df=veri, guc=guc_hesapla(veri),
+                                    elo=elo_hesapla(veri), lig_kod=lig_kod)
             oynanmis = veri.dropna(subset=["FTHG"])
             g = st.session_state["guc"]
             st.success(f"✅ {len(oynanmis)} maçla model kuruldu "
@@ -116,7 +117,13 @@ def mac_karti(ev, dep, t, oranlar=None, tarih="", anahtar="", bazlar=None):
                    f"<div class='etiket'>⚖️ 2.5 ÇİZGİSİ</div><div class='deger'>{au_secim} 2.5</div>"
                    f"<div class='etiket'>%{au_p} · taban %{au_baz}</div></div>")
     notlar = " · ".join(t.get("notlar", []))
-    st.markdown(f"<div class='mac'><div class='mac-ust'><b>{ev} — {dep}</b>"
+    guven = t.get("guven")
+    guven_rozet = ""
+    if guven == "YÜKSEK":
+        guven_rozet = "<span style='background:#0A7A0A;color:#fff;padding:1px 8px;border-radius:4px;font-size:11px'>✓ İKİ MODEL UYUMLU</span> "
+    elif guven == "TEMKİN":
+        guven_rozet = "<span style='background:#B00;color:#fff;padding:1px 8px;border-radius:4px;font-size:11px'>⚠ MODELLER ÇELİŞİYOR</span> "
+    st.markdown(f"<div class='mac'><div class='mac-ust'><b>{guven_rozet}{ev} — {dep}</b>"
                 f"<span class='etiket'>{tarih} · xG {t['lam_ev']}-{t['lam_dep']} · skor {t['skor']}"
                 f"{' · ' + notlar if notlar else ''}</span></div>"
                 f"<div class='olasilik' style='grid-template-columns:repeat(4,1fr)'>{oneri_html}</div></div>",
@@ -209,8 +216,8 @@ elif menu == "Program":
                     st.error(f"Fikstür çekilemedi: {e}")
             for fi, m in st.session_state.get("fikstur", pd.DataFrame()).iterrows():
                 eksik = eksik_paneli(m["HomeTeam"], m["AwayTeam"], f"f{fi}")
-                t = mac_tahmin(guc, m["HomeTeam"], m["AwayTeam"],
-                               mac_tarihi=m.get("Date"), eksikler=eksik)
+                t = mac_tahmin(guc, m["HomeTeam"], m["AwayTeam"], mac_tarihi=m.get("Date"),
+                               eksikler=eksik, elo=st.session_state.get("elo"))
                 if not t:
                     continue
                 oranlar = {"1": m.get("B365H"), "X": m.get("B365D"), "2": m.get("B365A")}
@@ -261,7 +268,8 @@ elif menu == "Elle Tahmin":
             if ev == dep:
                 st.warning("İki farklı takım seçin.")
             else:
-                t = mac_tahmin(guc, ev, dep, eksikler=eksik, tarafsiz=tarafsiz)
+                t = mac_tahmin(guc, ev, dep, eksikler=eksik, tarafsiz=tarafsiz,
+                               elo=st.session_state.get("elo"))
                 mac_karti(ev, dep, t, {k: v for k, v in oranlar.items() if v > 1.01}, anahtar="elle",
                           bazlar=guc.get("bazlar"))
                 fe, fd = form_ozeti(df, ev), form_ozeti(df, dep)
@@ -296,6 +304,19 @@ elif menu == "Backtest":
         c7, c8 = st.columns(2)
         c7.metric("Value bahis sayısı", rapor["value_bahis"])
         c8.metric("Value stratejisi ROI", f"%{rapor['value_roi_%']}")
+        if rapor.get("kalibrasyon"):
+            st.markdown("### 🎯 Kalibrasyon — model dürüst mü?")
+            st.caption("Model '%X' derken gerçekte kaç tutmuş? İdeal: gerçek ≈ tahmin. "
+                       "Sapma varsa kalibrasyon katsayısıyla otomatik düzeltiliyor.")
+            st.dataframe(pd.DataFrame([
+                {"Model dedi": k, "Maç": v["mac"], "Gerçekte tuttu": f"%{v['gercek_%']}"}
+                for k, v in rapor["kalibrasyon"].items()]),
+                hide_index=True, use_container_width=True)
+        if rapor.get("mutabakat_mac"):
+            st.metric("İki model uyumlu maçlarda 1X2 isabeti",
+                      f"%{rapor['mutabakat_isabet_%']}",
+                      help=f"Poisson ve Elo aynı favoriyi gösterdiği {rapor['mutabakat_mac']} maç. "
+                           "Genel 1X2 isabetinden yüksekse, 'iki model uyumlu' rozeti gerçek sinyaldir.")
         if rapor.get("market_kirilim"):
             st.markdown("### Öneri isabetinin market kırılımı")
             st.caption("Hangi market türüne güvenilir, hangisinden uzak durulur — kanıtı bu tablo. "
