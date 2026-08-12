@@ -17,6 +17,7 @@ from futbol_veri import (TUM_LIGLER, ANA_LIGLER, lig_verisi_cek, fikstur_cek,
 from futbol_tablo import puan_durumu, son_mac_sonuclari
 from futbol_bulten import gunun_maclari, hafta_ozeti, ESPN_SLUG, teshis
 import futbol_kayit as kayit
+import futbol_espn as espn
 from futbol_kriter import (takim_defteri, hakem_defteri, mac_tahmin_puan,
                            en_iyi_uc, agirlik_sozlugu, agirlik_durumu, MARKET_ETIKET,
                            kriter_karne, KRITER_TANIM, tahmin_isabeti)
@@ -79,7 +80,8 @@ with st.sidebar:
     st.write("---")
     # st.radio: seçim kalıcı, menü kapanmaz (rerun sorunu çözüldü)
     menu = st.radio("Menü", ["Dashboard", "Günün Bülteni", "Tahmin", "Puan Durumu",
-                             "Bahis Oranları", "Kriter Karnesi", "Tahmin Karnesi"],
+                             "Bahis Oranları", "Kriter Karnesi", "Tahmin Karnesi",
+                             "ESPN Veri"],
                     label_visibility="collapsed")
     st.write("---")
     st.caption("Hiçbir model kazanç garantisi vermez; bahis şirketi marjı her orana gömülüdür. "
@@ -784,3 +786,103 @@ elif menu == "Tahmin Karnesi":
                 st.caption("Not: '%50 = yazı-tura' çizgisidir. Bunun altındakiler bu ligde "
                            "işe yaramıyor; üstündekiler gerçek değer taşıyor. Kriterler atılmaz "
                            "ama en çok tutan tahmin tiplerine güvenmek mantıklıdır.")
+
+
+elif menu == "ESPN Veri":
+    st.markdown("# 🌐 ESPN Veri")
+    st.caption("ESPN'in açık API'sinden zengin veri: puan durumu, oranlar, sakatlıklar, "
+               "gol kralları, maç olayları. ⚠️ Hepsi resmi olmayan kaynak — özellikle "
+               "sakatlık verisi güncel olmayabilir, teyit ederek kullan.")
+
+    ec1, ec2 = st.columns([2, 1])
+    espn_lig = ec1.selectbox("Lig", list(TUM_LIGLER.keys()),
+                             format_func=lambda k: TUM_LIGLER[k],
+                             index=list(TUM_LIGLER.keys()).index(lig_kod), key="espn_lig_sec")
+    espn_gun = ec2.date_input("Tarih (oran/olay için)", value=tsi_bugun(),
+                              format="DD.MM.YYYY", key="espn_gun_sec")
+
+    t1, t2, t3, t4, t5 = st.tabs(["🏆 Puan Durumu", "💱 Oranlar", "🏥 Sakatlıklar",
+                                   "⚽ Gol Kralları", "📋 Maç Olayları"])
+
+    with t1:
+        if st.button("🏆 Puan durumunu getir", key="espn_puan"):
+            with st.spinner("ESPN puan durumu çekiliyor…"):
+                try:
+                    tablo = espn.puan_durumu_espn(espn_lig)
+                    if tablo.empty:
+                        st.info("Puan durumu alınamadı (lig başlamamış olabilir ya da ESPN yanıt vermedi).")
+                    else:
+                        st.dataframe(tablo, hide_index=True, use_container_width=True, height=560)
+                except Exception as e:
+                    st.error(f"Hata: {e}")
+
+    with t2:
+        if st.button("💱 Maç oranlarını getir", key="espn_oran"):
+            with st.spinner("ESPN oranları çekiliyor…"):
+                try:
+                    tablo = espn.mac_oranlari_espn(espn_lig, tarih=espn_gun)
+                    if tablo.empty:
+                        st.info(f"{espn_gun:%d.%m.%Y} için oran bulunamadı (o gün maç yok ya da "
+                                "ESPN oran vermedi).")
+                    else:
+                        st.dataframe(tablo, hide_index=True, use_container_width=True)
+                        st.caption("ESPN oranları genelde Amerikan formatında (moneyline). "
+                                   "Bilgi amaçlı; ana oran kaynağımız Bahis Oranları ekranı.")
+                except Exception as e:
+                    st.error(f"Hata: {e}")
+
+    with t3:
+        st.caption("⚠️ ESPN'in futbol sakatlık verisi güncel/eksiksiz olmayabilir. "
+                   "Doğruluğunu başka kaynaktan teyit et.")
+        if st.button("🏥 Sakatlıkları getir", key="espn_sakat"):
+            with st.spinner("Tüm takımların sakatlıkları çekiliyor… (yavaş olabilir)"):
+                try:
+                    tablo = espn.sakatlik_espn(espn_lig)
+                    if tablo.empty:
+                        st.info("Sakatlık verisi bulunamadı (ESPN bu lig için veri vermiyor olabilir).")
+                    else:
+                        st.dataframe(tablo, hide_index=True, use_container_width=True, height=500)
+                except Exception as e:
+                    st.error(f"Hata: {e}")
+
+    with t4:
+        if st.button("⚽ Gol krallarını getir", key="espn_gol"):
+            with st.spinner("Gol kralları çekiliyor…"):
+                try:
+                    tablo = espn.gol_krallari_espn(espn_lig)
+                    if tablo.empty:
+                        st.info("Gol kralı verisi bulunamadı (sezon başı ya da ESPN vermedi).")
+                    else:
+                        st.dataframe(tablo, hide_index=True, use_container_width=True, height=500)
+                except Exception as e:
+                    st.error(f"Hata: {e}")
+
+    with t5:
+        st.caption("Seçili günün bir maçını seç, olaylarını (gol/kart/istatistik) gör.")
+        if st.button("📋 Günün maçlarını listele", key="espn_mac_liste"):
+            try:
+                st.session_state["espn_maclar"] = espn.mac_id_bul(espn_lig, tarih=espn_gun)
+            except Exception as e:
+                st.error(f"Hata: {e}")
+        maclar = st.session_state.get("espn_maclar", [])
+        if maclar:
+            secenekler = {f"{m['ev']} — {m['dep']} ({m['durum']})": m["id"] for m in maclar}
+            secili = st.selectbox("Maç seç", list(secenekler.keys()), key="espn_mac_sec")
+            if st.button("Olayları getir", key="espn_olay"):
+                with st.spinner("Maç olayları çekiliyor…"):
+                    try:
+                        veri = espn.mac_olaylari_espn(espn_lig, secenekler[secili])
+                        if veri.get("olaylar"):
+                            st.markdown("**Olaylar**")
+                            st.dataframe(pd.DataFrame(veri["olaylar"]), hide_index=True,
+                                         use_container_width=True)
+                        if veri.get("istatistik"):
+                            st.markdown("**İstatistikler**")
+                            st.dataframe(pd.DataFrame(veri["istatistik"]), hide_index=True,
+                                         use_container_width=True)
+                        if not veri.get("olaylar") and not veri.get("istatistik"):
+                            st.info("Bu maç için olay/istatistik yok (henüz oynanmamış olabilir).")
+                    except Exception as e:
+                        st.error(f"Hata: {e}")
+        elif "espn_maclar" in st.session_state:
+            st.info("Bu günde maç bulunamadı.")
