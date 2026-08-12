@@ -14,6 +14,8 @@ from futbol_motoru import (guc_hesapla, mac_tahmin, value_hesapla, form_ozeti,
                            backtest, en_iyi_uc, MARKET_ETIKET, elo_hesapla)
 from futbol_veri import (TUM_LIGLER, ANA_LIGLER, lig_verisi_cek, fikstur_cek,
                         gunun_bulteni, sezon_etiketi)
+from futbol_tablo import puan_durumu, son_mac_sonuclari
+from futbol_kriter import kriter_karne, KRITER_TANIM
 
 st.set_page_config(page_title="AVELOR Futbol", page_icon="⚽",
                    layout="wide", initial_sidebar_state="expanded")
@@ -63,8 +65,9 @@ with st.sidebar:
                            index=list(TUM_LIGLER.keys()).index("T1"))
     sezon_sayisi = st.slider("Model kaç sezona baksın", 1, 5, 3)
     st.write("---")
-    for ad, ikon in [("Günün Bülteni", "🗓️"), ("Program", "📡"), ("Takım Güçleri", "🔬"),
-                     ("Elle Tahmin", "🎯"), ("Backtest", "🧪"), ("Karne", "📈")]:
+    for ad, ikon in [("Günün Bülteni", "🗓️"), ("Program", "📡"), ("Puan Durumu", "📊"),
+                     ("Bahis Oranları", "💱"), ("Kriter Karnesi", "🔬"),
+                     ("Elle Tahmin", "🎯"), ("Karne", "📈")]:
         if st.button(f"{ikon} {ad}", use_container_width=True,
                      type="primary" if st.session_state["menu"] == ad else "secondary"):
             st.session_state["menu"] = ad
@@ -230,6 +233,86 @@ elif menu == "Program":
                     "iki takımı seçip (istersen oranları da girip) analiz alabilirsin.")
     elif guc is not None:
         st.info("Lig değişti — yeni lig için modeli tekrar kurun.")
+
+elif menu == "Puan Durumu":
+    st.markdown("# 📊 Puan Durumu")
+    st.caption("2026/27 sezonu — genel, iç saha ve deplasman tabloları. Tek sezon: "
+               "geçmiş sezon verisi yok, sadece bu sezon oynanan maçlar.")
+    if df is None:
+        st.info("Önce **Program** ekranından ligi seçip veriyi çekin.")
+    else:
+        sek1, sek2, sek3, sek4 = st.tabs(["🏆 Genel", "🏠 İç Saha", "✈️ Deplasman", "📅 Son Maçlar"])
+        with sek1:
+            st.dataframe(puan_durumu(df, "genel"), hide_index=True, use_container_width=True, height=560)
+        with sek2:
+            st.caption("Sadece ev sahibi olarak oynanan maçlar.")
+            st.dataframe(puan_durumu(df, "ic"), hide_index=True, use_container_width=True, height=560)
+        with sek3:
+            st.caption("Sadece deplasmanda oynanan maçlar.")
+            st.dataframe(puan_durumu(df, "dis"), hide_index=True, use_container_width=True, height=560)
+        with sek4:
+            sonuc = son_mac_sonuclari(df, gun=21)
+            if sonuc.empty:
+                st.info("Son 3 haftada oynanmış maç yok.")
+            else:
+                st.dataframe(sonuc, hide_index=True, use_container_width=True, height=560)
+
+elif menu == "Bahis Oranları":
+    st.markdown("# 💱 Bahis Oranları")
+    st.caption("15-16 firmanın ortalama oranı — **bu bizim tahminimiz DEĞİL**, piyasanın oranıdır. "
+               "Sadece 1X2 ve Alt/Üst 2.5 gösterilir.")
+    if st.session_state.get("lig_kod") != lig_kod or guc is None:
+        st.info("Önce **Program** ekranından ligi seçip modeli kurun.")
+    else:
+        if st.button("💱 Yaklaşan maçların oranlarını getir", type="primary"):
+            try:
+                fx = fikstur_cek(lig_kod)
+                st.session_state["oran_fikstur"] = fx
+            except Exception as e:
+                st.error(f"Oranlar çekilemedi: {e}")
+        fx = st.session_state.get("oran_fikstur", pd.DataFrame())
+        if not fx.empty:
+            import re as _re
+            satirlar = []
+            for _, m in fx.iterrows():
+                # 1X2: tüm firma sütunlarının ortalaması (H/D/A ile biten)
+                h = [m[c] for c in fx.columns if _re.search(r'[A-Za-z]+H$', str(c)) and pd.notna(m.get(c))]
+                dd = [m[c] for c in fx.columns if _re.search(r'[A-Za-z]+D$', str(c)) and pd.notna(m.get(c))]
+                a = [m[c] for c in fx.columns if _re.search(r'[A-Za-z]+A$', str(c)) and pd.notna(m.get(c))]
+                satirlar.append({
+                    "Tarih": m["Date"].strftime("%d.%m") if pd.notna(m.get("Date")) else "",
+                    "Ev": m["HomeTeam"], "Dep": m["AwayTeam"],
+                    "1 (ort)": round(np.mean(h), 2) if h else "-",
+                    "X (ort)": round(np.mean(dd), 2) if dd else "-",
+                    "2 (ort)": round(np.mean(a), 2) if a else "-"})
+            st.dataframe(pd.DataFrame(satirlar), hide_index=True, use_container_width=True)
+            st.caption("Not: kaynak Alt/Üst 2.5 oranını bazı maçlarda ayrı sütunda verir; "
+                       "1X2 ortalaması her firmanın ev/beraberlik/deplasman oranından alınır.")
+        else:
+            st.info("Yaklaşan maç bulunamadı (sezon arası ya da fikstür henüz güncellenmemiş olabilir).")
+
+elif menu == "Kriter Karnesi":
+    st.markdown("# 🔬 Kriter Karnesi")
+    st.caption("21 kriterin, oynanan maç sonuçlarıyla ne kadar tuttuğu. Her kriter kendi "
+               "ALANINDA test edilir (sonuç/gol/kart/korner/İY). Kriterler ATILMAZ — güçlü "
+               "olanların ağırlığı artar. Bu sezon test sezonu; veri biriktikçe rakamlar oturur.")
+    if df is None:
+        st.info("Önce **Program** ekranından ligi seçip veriyi çekin.")
+    else:
+        oynanmis = df.dropna(subset=["FTHG"])
+        st.metric("Değerlendirmeye giren maç", len(oynanmis))
+        if len(oynanmis) < 20:
+            st.warning(f"⚠️ Sadece {len(oynanmis)} maç oynanmış. Sezon başında kriter güçleri "
+                       "GÜVENİLMEZ — en az 20-30 maç gerekir, anlamlı sonuç için 100+. Bu "
+                       "tamamen normal: tek sezon kuralının kaçınılmaz sonucu. Veri biriktikçe gelin.")
+        if st.button("🔬 Kriterleri değerlendir", type="primary"):
+            with st.spinner("Her maçta 21 kriter, o güne kadarki veriyle sınanıyor…"):
+                karne = kriter_karne(df)
+            st.dataframe(karne, hide_index=True, use_container_width=True, height=760)
+            st.caption("Tutma %: kriterin kendi alanında doğru çıkma oranı (%50=şans). "
+                       "Ağırlık: %50 üstü her puan ağırlığı artırır. 'Veri az' olanlar henüz "
+                       "güvenilmez. İşe yaramayanlar atılmaz — düşük ağırlıkla masada kalır, "
+                       "sezonun başka döneminde parlayabilir.")
 
 elif menu == "Takım Güçleri":
     st.markdown("# 🔬 Takım Güçleri")
