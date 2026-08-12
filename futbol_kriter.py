@@ -294,3 +294,124 @@ def kriter_karne(df: pd.DataFrame, min_gecmis: int = 20) -> pd.DataFrame:
                          "Ağırlık": agirlik if deneme >= min_gecmis else 1.0,
                          "Güvenilir mi": "✓" if deneme >= min_gecmis else "veri az"})
     return pd.DataFrame(satirlar).sort_values("Tutma %", ascending=False, na_position="last")
+
+
+# ---------------------------------------------------------------------------
+# TAHMİN KATMANI — kriterleri ağırlıklarıyla birleştirip markete olasılık üret
+# ---------------------------------------------------------------------------
+# Her market, o markete ait kriterlerin ağırlıklı ortalamasından beslenir.
+MARKET_KRITER = {
+    # market: [(kriter_kodu, yon)]  yon=+1 kriter yüksekse market lehine, -1 ters
+    "1":       [("form5", 1), ("ic_form", 1), ("hucum", 1), ("ev_avantaj", 1),
+                ("ofsayt_tuzak", 1), ("yorgunluk", 1), ("xg", 1)],
+    "2":       [("dis_form", 1), ("form5", -1), ("hucum", -1), ("ev_avantaj", -1)],
+    "ust25":   [("hucum", 1), ("son5_att", 1), ("xg", 1), ("son5_yen", -1),
+                ("hava_zemin", 1), ("iy_gol", 1)],
+    "kg_var":  [("hucum", 1), ("son5_att", 1), ("savunma", -1), ("xg", 1)],
+    "korner_ust":[("korner", 1)],
+    "kart_ust":[("kart_takim", 1), ("faul", 1), ("hakem_sari", 1), ("hakem_kirmizi", 1),
+                ("hakem_son5", 1), ("disiplin", 1)],
+    "iy_ust":  [("iy_gol", 1), ("hucum", 1), ("son5_att", 1)],
+}
+MARKET_ETIKET = {
+    "1": "MS 1 (ev)", "2": "MS 2 (dep)", "X": "MS X",
+    "1X": "Çifte Şans 1-X", "X2": "Çifte Şans X-2",
+    "ust25": "2.5 Üst", "alt25": "2.5 Alt", "kg_var": "KG Var", "kg_yok": "KG Yok",
+    "korner_ust": "Korner 9.5 Üst", "kart_ust": "Kart 3.5 Üst", "iy_ust": "İY 0.5 Üst",
+}
+
+
+def _puan_to_olasilik(agirlikli_puan, taban=50.0):
+    """Ağırlıklı kriter puanını (0-100) olasılığa çevir. Nötr 50 → taban olasılık.
+    Sapmayı yumuşat (aşırı özgüven modelin en büyük hatası): 0.45 katsayı, tavan %88."""
+    return round(max(8, min(88, 50 + (agirlikli_puan - 50) * 0.45)), 1)
+
+
+def mac_tahmin_puan(ev, dep, defter, hakem_def, agirliklar=None, hava=None,
+                    hakem=None, mac_tarihi=None):
+    """Puan-ağırlık motoru: 21 kriterden markete olasılık üretir.
+    agirliklar: {kriter_kodu: ağırlık} (Kriter Karnesi'nden; yoksa hepsi 1.0)."""
+    if ev not in defter or dep not in defter:
+        return None
+    w = agirliklar or {}
+    P = kriter_puanla(ev, dep, defter[ev], defter[dep], hakem_def, defter,
+                      hava=hava, hakem=hakem, mac_tarihi=mac_tarihi)
+
+    def market_puan(market):
+        pay = payda = 0.0
+        for kod, yon in MARKET_KRITER.get(market, []):
+            if kod not in P:
+                continue
+            ag = w.get(kod, 1.0)
+            puan = P[kod]["ev_puan"]
+            deger = puan if yon == 1 else (100 - puan)
+            pay += ag * deger
+            payda += ag
+        return (pay / payda) if payda else 50.0
+
+    t = {}
+    p1 = _puan_to_olasilik(market_puan("1"))
+    p2 = _puan_to_olasilik(market_puan("2"))
+    # beraberlik: 1 ve 2 ne kadar dengeliyse o kadar yüksek
+    denge = 100 - abs(p1 - p2)
+    px = round(max(8, min(40, denge * 0.32)), 1)
+    # normalize 1X2
+    tpl = p1 + px + p2
+    t["1"], t["X"], t["2"] = round(p1/tpl*100,1), round(px/tpl*100,1), round(p2/tpl*100,1)
+    t["1X"] = round(t["1"] + t["X"], 1)
+    t["X2"] = round(t["X"] + t["2"], 1)
+    t["ust25"] = _puan_to_olasilik(market_puan("ust25"))
+    t["alt25"] = round(100 - t["ust25"], 1)
+    t["kg_var"] = _puan_to_olasilik(market_puan("kg_var"))
+    t["kg_yok"] = round(100 - t["kg_var"], 1)
+    t["korner_ust"] = _puan_to_olasilik(market_puan("korner_ust"))
+    t["kart_ust"] = _puan_to_olasilik(market_puan("kart_ust"))
+    t["iy_ust"] = _puan_to_olasilik(market_puan("iy_ust"))
+    t["_ev_mac"] = defter[ev]["mac"]
+    t["_dep_mac"] = defter[dep]["mac"]
+    t["_guven"] = "düşük" if min(defter[ev]["mac"], defter[dep]["mac"]) < 5 else "orta"
+    return t
+
+
+def en_iyi_uc(t, bazlar=None):
+    """Lig tabanına göre en yüksek KENAR'lı 3 öneri (cesur, çeşitli)."""
+    if not t:
+        return []
+    bazlar = bazlar or {"1": 45, "2": 30, "ust25": 52, "kg_var": 52,
+                        "korner_ust": 50, "kart_ust": 50, "iy_ust": 60, "1X": 65, "X2": 50}
+    grup = {"1": "sonuc", "2": "sonuc", "1X": "sonuc", "X2": "sonuc",
+            "ust25": "gol", "alt25": "gol", "kg_var": "kg", "kg_yok": "kg",
+            "korner_ust": "korner", "kart_ust": "kart", "iy_ust": "iy"}
+    adaylar = []
+    for kod in MARKET_ETIKET:
+        if kod not in t or not isinstance(t[kod], (int, float)):
+            continue
+        p = float(t[kod])
+        kenar = p - bazlar.get(kod, 50)
+        if p >= 50 and kenar >= 5:
+            adaylar.append((kenar, p, kod))
+    adaylar.sort(reverse=True)
+    secim, gruplar = [], set()
+    for kenar, p, kod in adaylar:
+        g = grup.get(kod, kod)
+        if g in gruplar:
+            continue
+        secim.append({"market": MARKET_ETIKET[kod], "olasilik": round(p,1),
+                      "kenar": round(kenar,1)})
+        gruplar.add(g)
+        if len(secim) == 3:
+            break
+    return secim
+
+
+def agirlik_sozlugu(df: pd.DataFrame, min_gecmis: int = 20) -> dict:
+    """Kriter karnesinden {kriter_kodu: ağırlık} üretir. Güvenilir olmayan
+    (az veri) kriterler 1.0 (nötr) kalır. Tahmin motoru bunu kullanır."""
+    karne = kriter_karne(df, min_gecmis=min_gecmis)
+    ad_kod = {k[1]: k[0] for k in KRITER_TANIM}
+    w = {}
+    for _, r in karne.iterrows():
+        kod = ad_kod.get(r["Kriter"])
+        if kod:
+            w[kod] = r["Ağırlık"] if r["Güvenilir mi"] == "✓" else 1.0
+    return w
