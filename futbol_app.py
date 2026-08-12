@@ -327,6 +327,78 @@ if menu == "Dashboard":
                     st.error(f"Güncelleme sırasında hata: {e}")
 
     st.write("")
+    # ---- Haftanın en güçlü tahminleri (tüm ligler taranır) ----
+    st.markdown("### 🔝 Haftanın En Güçlü Tahminleri")
+    st.caption("Tüm liglerin bu haftaki maçları taranır; en yüksek olasılıklı tahminler listelenir. "
+               "Tarama birkaç dakika sürebilir.")
+    if st.button("🔝 Haftanın en iyilerini hesapla"):
+        with st.spinner("Tüm ligler taranıyor, en güçlü tahminler bulunuyor…"):
+            try:
+                ilerleme = st.empty()
+                havuz = []  # {lig, ev, dep, tarih, market, yuzde}
+                lig_listesi = list(ANA_LIGLER.keys())
+                for li, lkod in enumerate(lig_listesi):
+                    ilerleme.caption(f"({li+1}/{len(lig_listesi)}) {TUM_LIGLER[lkod]}…")
+                    try:
+                        veri = lig_verisi_cek(lkod, 1)
+                    except Exception:
+                        continue
+                    if veri.empty or len(veri.dropna(subset=["FTHG"])) == 0:
+                        continue
+                    wl = agirlik_sozlugu(veri)
+                    defter = takim_defteri(veri, veri["Date"].max() + pd.Timedelta(days=1))
+                    hk = hakem_defteri(veri, veri["Date"].max() + pd.Timedelta(days=1))
+                    mevcut = [k for k in defter if not k.startswith("_")]
+                    def esle(ad, mv=mevcut):
+                        if ad in mv: return ad
+                        ilk = ad.split()[0].lower() if ad else ""
+                        for tt in mv:
+                            if ilk and (ilk in tt.lower() or tt.lower().split()[0] in ad.lower()):
+                                return tt
+                        return None
+                    for i in range(7):
+                        g = datetime.date.today() + datetime.timedelta(days=i)
+                        try:
+                            mlar = gunun_maclari(tarih=g, lig_kodu=lkod)
+                        except Exception:
+                            continue
+                        for _, mc in mlar.iterrows():
+                            ev_e, dep_e = esle(mc["Ev"]), esle(mc["Dep"])
+                            if not ev_e or not dep_e or ev_e == dep_e:
+                                continue
+                            t = mac_tahmin_puan(ev_e, dep_e, defter, hk, agirliklar=wl)
+                            if not t:
+                                continue
+                            for mk in MARKET_ETIKET:
+                                if mk in t and isinstance(t[mk], (int, float)):
+                                    havuz.append({"Lig": TUM_LIGLER[lkod], "Tarih": f"{g:%d.%m}",
+                                                  "Maç": f"{mc['Ev']} - {mc['Dep']}",
+                                                  "Tahmin": MARKET_ETIKET[mk], "_kod": mk,
+                                                  "Olasılık %": t[mk]})
+                ilerleme.empty()
+                st.session_state["haftalik_havuz"] = havuz
+            except Exception as e:
+                st.error(f"Tarama hatası: {e}")
+
+    havuz = st.session_state.get("haftalik_havuz")
+    if havuz:
+        dfh = pd.DataFrame(havuz)
+        sekme1, sekme2 = st.tabs(["🏆 En yüksek 20 (tüm tipler)", "⬆️ En yüksek 20 · 2.5 Üst"])
+        with sekme1:
+            en20 = dfh.sort_values("Olasılık %", ascending=False).head(20)
+            st.dataframe(en20[["Tarih", "Lig", "Maç", "Tahmin", "Olasılık %"]],
+                         hide_index=True, use_container_width=True, height=560)
+        with sekme2:
+            ust = dfh[dfh["_kod"] == "ust25"].sort_values("Olasılık %", ascending=False).head(20)
+            if ust.empty:
+                st.info("Bu hafta 2.5 Üst tahmini bulunamadı.")
+            else:
+                st.dataframe(ust[["Tarih", "Lig", "Maç", "Olasılık %"]],
+                             hide_index=True, use_container_width=True, height=560)
+        st.caption("⚠️ Yüksek olasılık ≠ garanti. Sezon başında az veriyle üretilen yüzdeler "
+                   "oynaktır; Tahmin Karnesi'nde hangi tahmin tipinin gerçekten tuttuğunu izle.")
+
+    st.write("")
     st.markdown("### 🗓️ Bugünün maçları")
     if st.button("Bugünün programını getir"):
         try:
