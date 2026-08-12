@@ -16,7 +16,7 @@ from futbol_veri import (TUM_LIGLER, ANA_LIGLER, lig_verisi_cek, fikstur_cek,
                          gunun_bulteni, fikstur_gunleri, sezon_etiketi)
 from futbol_tablo import puan_durumu, son_mac_sonuclari
 from futbol_kriter import (takim_defteri, hakem_defteri, mac_tahmin_puan,
-                           en_iyi_uc, agirlik_sozlugu, MARKET_ETIKET,
+                           en_iyi_uc, agirlik_sozlugu, agirlik_durumu, MARKET_ETIKET,
                            kriter_karne, KRITER_TANIM)
 
 st.set_page_config(page_title="AVELOR Futbol", page_icon="⚽",
@@ -85,15 +85,23 @@ def model_kur():
                 st.error("Veri indirilemedi — lig dosyası bulunamadı ya da site erişilemez.")
                 return
             oynanmis = veri.dropna(subset=["FTHG"])
-            w = agirlik_sozlugu(veri) if len(oynanmis) >= 20 else {}
+            w = agirlik_sozlugu(veri)
             st.session_state.update(lig_df=veri, agirliklar=w, lig_kod=lig_kod)
             st.success(f"✅ {len(oynanmis)} maç yüklendi "
                        f"({oynanmis['Date'].min():%d.%m.%Y} → {oynanmis['Date'].max():%d.%m.%Y})")
-            if len(oynanmis) < 20:
-                st.warning(f"⚠️ Sadece {len(oynanmis)} maç — kriter ağırlıkları henüz "
-                           "hesaplanamıyor (nötr 1.0). Tek sezon kuralının sezon başı gerçeği.")
+            durum = agirlik_durumu(veri)
+            if len(oynanmis) == 0:
+                st.warning("📭 Bu ligde bu sezon **henüz hiç maç oynanmamış**. Tek sezon kuralı "
+                           "gereği sistem yalnızca bu sezonun maçlarından öğrenir — ilk maçlar "
+                           "oynanana kadar tahmin ve ağırlık üretilemez. Bu bir hata değil, "
+                           "sezon başının doğal hali. İlk hafta oynandıktan sonra tekrar çekin; "
+                           "sistem uyanmaya başlayacak.")
+            elif durum["durum"] == "Bekliyor":
+                st.warning(f"⚠️ {durum['aciklama']} Şimdilik tüm kriterler nötr (1.0). "
+                           "Birkaç maç daha oynanınca ağırlıklar kendiliğinden devreye girer.")
             else:
-                st.info(f"📊 Kriter ağırlıkları {len(oynanmis)} maçtan öğrenildi.")
+                st.info(f"📊 Ağırlıklar oynanmış maçlardan hesaplandı — **{durum['kademe']}** olgunluk. "
+                        f"{durum['aciklama']} Kriter Karnesi'nde detayları görebilirsin.")
         except Exception as e:
             st.error(f"Yüklenemedi: {e}")
 
@@ -144,9 +152,13 @@ if menu == "Dashboard":
                 f"<div class='buyuk'>{oyn}</div></div>", unsafe_allow_html=True)
     c3.markdown(f"<div class='kutu'><div class='etiket'>Kriter Havuzu</div>"
                 f"<div class='buyuk'>{len(KRITER_TANIM)}</div></div>", unsafe_allow_html=True)
-    durum = "Hazır" if oyn >= 20 else ("Veri az" if oyn > 0 else "Boş")
-    c4.markdown(f"<div class='kutu'><div class='etiket'>Ağırlık Durumu</div>"
-                f"<div class='buyuk' style='font-size:22px'>{durum}</div></div>", unsafe_allow_html=True)
+    if df is not None:
+        ad = agirlik_durumu(df)
+        durum_txt = ad["kademe"] if ad["durum"] == "Aktif" else "Bekliyor"
+    else:
+        durum_txt = "Boş"
+    c4.markdown(f"<div class='kutu'><div class='etiket'>Ağırlık Olgunluğu</div>"
+                f"<div class='buyuk' style='font-size:18px'>{durum_txt}</div></div>", unsafe_allow_html=True)
     st.write("")
     if df is None:
         st.info("Başlamak için soldan bir lig seçip **Program** ekranından veriyi çekin. "
@@ -186,6 +198,25 @@ if menu == "Dashboard":
 elif menu == "Günün Bülteni":
     st.markdown("# 🗓️ Günün Bülteni")
     simdi = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+    st.caption(f"TSİ {simdi:%H:%M} · Bugün {simdi:%d.%m.%Y}. Bir gün seçip o günün maçlarını gör. "
+               "**Not:** Kaynak, ileri tarihli fikstürü genelde 3-5 gün önceden yayınlar; "
+               "çok ileri bir gün seçersen henüz maç görünmeyebilir.")
+
+    # Hangi günlerde maç var? (kaynak fikstüründen özet — kullanıcı kör seçmesin)
+    if st.button("📅 Önümüzdeki günlerde maç olan tarihleri göster"):
+        try:
+            gunler = fikstur_gunleri(21)
+            if gunler.empty:
+                st.warning("Kaynak fikstür dosyasında yaklaşan maç bulunamadı. Hafta ortasında "
+                           "(genelde Salı-Çarşamba) hafta sonu maçları dosyaya düşer.")
+            else:
+                gunler["Gün"] = gunler["Date"].dt.strftime("%d.%m.%Y (%a)")
+                st.dataframe(gunler[["Gün", "mac_sayisi"]].rename(
+                    columns={"mac_sayisi": "Maç sayısı"}), hide_index=True, use_container_width=True)
+                st.caption("↑ Bu tarihlerden birini aşağıdaki takvimden seçersen maçlar gelir.")
+        except Exception as e:
+            st.error(f"Tarih özeti çekilemedi: {e}")
+
     c1, c2 = st.columns([1, 1])
     secili_gun = c1.date_input("Gün seç", value=simdi.date(),
                                min_value=simdi.date() - datetime.timedelta(days=7),
@@ -194,28 +225,34 @@ elif menu == "Günün Bülteni":
     bugun_mu = secili_gun == simdi.date()
     sadece_kalan = c2.toggle("Sadece kalan maçlar", value=True, disabled=not bugun_mu,
                              help="Yalnızca bugün için geçerli")
-    st.caption(f"TSİ {simdi:%H:%M} · Seçili gün: **{secili_gun:%d.%m.%Y}** — tüm liglerin maçları, "
-               "başlama saatine göre sıralı.")
     if st.button("🗓️ Seçili günün maçlarını getir", type="primary", use_container_width=True):
         with st.spinner("Program çekiliyor…"):
             try:
                 st.session_state["bulten"] = gunun_bulteni(
-                    sadece_kalan=sadece_kalan and bugun_mu, tsi_simdi=simdi, secili_gun=secili_gun)
+                    sadece_kalan=sadece_kalan and bugun_mu, tsi_simdi=simdi,
+                    secili_gun=secili_gun, gecmis_df=df)
+                st.session_state["bulten_gun"] = secili_gun
             except Exception as e:
                 st.error(f"Bülten çekilemedi: {e}")
     b = st.session_state.get("bulten")
     if b is not None:
+        secilen = st.session_state.get("bulten_gun", secili_gun)
         if b.empty:
-            st.info("Bu gün için maç bulunamadı. Kaynak fikstür dosyası haftalık güncellenir; "
-                    "ileri tarihli maçlar için hafta ortasını bekleyin.")
+            st.info(f"**{secilen:%d.%m.%Y}** için maç bulunamadı. Olası sebepler: (1) o gün "
+                    "hiç maç yok, (2) ileri tarihli fikstür henüz kaynağa düşmemiş (3-5 gün "
+                    "önceden gelir), (3) geçmiş bir gün seçtiysen o günün sonuçları yalnızca "
+                    "yüklü ligin verisinde bulunur — üstteki '📅 tarihleri göster' ile hangi "
+                    "günlerde maç olduğunu görebilirsin.")
         else:
-            st.markdown(f"**{len(b)} maç**")
+            st.markdown(f"**{secilen:%d.%m.%Y} — {len(b)} maç**")
             for _, m in b.iterrows():
+                skor = m.get("Skor", "")
+                orta = f" <b>{skor}</b> " if skor else " — "
                 oran = ""
-                if pd.notna(m.get("B365H")):
+                if not skor and pd.notna(m.get("B365H")):
                     oran = f" · {m['B365H']}/{m.get('B365D','-')}/{m.get('B365A','-')}"
                 st.markdown(f"<div class='mac' style='padding:8px 14px'>"
-                            f"<b>{m.get('Saat_TSI','--:--')}</b> &nbsp; {m['HomeTeam']} — {m['AwayTeam']}"
+                            f"<b>{m.get('Saat_TSI','--:--')}</b> &nbsp; {m['HomeTeam']}{orta}{m['AwayTeam']}"
                             f"<span class='etiket'> &nbsp; {m.get('Lig','')}{oran}</span></div>",
                             unsafe_allow_html=True)
 
@@ -231,7 +268,13 @@ elif menu == "Program":
                 st.session_state["fikstur"] = fikstur_cek(lig_kod)
             except Exception as e:
                 st.error(f"Fikstür çekilemedi: {e}")
-        for _, m in st.session_state.get("fikstur", pd.DataFrame()).iterrows():
+        fx = st.session_state.get("fikstur", pd.DataFrame())
+        if fx.empty and "fikstur" in st.session_state:
+            st.info("Bu lig için yaklaşan maç bulunamadı. Sebebi: (1) bu hafta maç günü henüz "
+                    "gelmedi, ya da (2) kaynak fikstür dosyası hafta sonu maçlarını genelde "
+                    "**Cuma öğleden sonra** yayınlar — hafta ortasında boş olması normaldir. "
+                    "Oynanmış maçları görmek için **Puan Durumu → Son Maçlar** sekmesine bakın.")
+        for _, m in fx.iterrows():
             t = _tahmin(m["HomeTeam"], m["AwayTeam"], mac_tarihi=m.get("Date"))
             mac_karti(m["HomeTeam"], m["AwayTeam"], t,
                       m["Date"].strftime("%d.%m.%Y") if pd.notna(m.get("Date")) else "")
