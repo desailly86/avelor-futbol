@@ -41,6 +41,10 @@ SLUG_AD = {
     "esp.1": "🇪🇸 La Liga", "ger.1": "🇩🇪 Bundesliga", "ita.1": "🇮🇹 Serie A",
     "fra.1": "🇫🇷 Ligue 1", "ned.1": "🇳🇱 Eredivisie", "por.1": "🇵🇹 Liga Portugal",
     "bel.1": "🇧🇪 Pro League", "gre.1": "🇬🇷 Süper Lig", "sco.1": "🏴 Premiership",
+    "usa.1": "🇺🇸 MLS", "uefa.champions": "🏆 Şampiyonlar Ligi",
+    "uefa.europa": "🥈 Avrupa Ligi", "eng.2": "🏴 Championship",
+    "esp.2": "🇪🇸 Segunda", "ger.2": "🇩🇪 2. Bundesliga", "ita.2": "🇮🇹 Serie B",
+    "fra.2": "🇫🇷 Ligue 2",
 }
 
 
@@ -84,15 +88,25 @@ def _cek(slug: str, tarih_yyyymmdd: str) -> list[dict]:
     return maclar
 
 
+# "Tüm ligler" için taranacak ana ligler (all endpoint'i lig adını boş döndürdüğü
+# için her ligi kendi slug'ıyla çekip birleştiriyoruz — bu kesin çalışıyor)
+ONEMLI_LIGLER = ["tur.1", "eng.1", "eng.2", "esp.1", "esp.2", "ger.1", "ger.2",
+                 "ita.1", "ita.2", "fra.1", "fra.2", "ned.1", "por.1", "bel.1",
+                 "gre.1", "sco.1", "usa.1", "uefa.champions", "uefa.europa"]
+
+
 def gunun_maclari(tarih=None, lig_kodu=None) -> pd.DataFrame:
-    """Seçili günün maçları. lig_kodu=None → TÜM ligler (tek çağrı 'all').
-    lig_kodu verilirse yalnızca o lig. Saate göre sıralı, TSİ."""
+    """Seçili günün maçları. lig_kodu=None → önemli liglerin hepsi tek tek çekilip
+    birleştirilir. lig_kodu verilirse yalnızca o lig. Saate göre sıralı, TSİ."""
     gun = pd.Timestamp(tarih) if tarih else pd.Timestamp(datetime.date.today())
     ymd = gun.strftime("%Y%m%d")
+    maclar = []
     if lig_kodu and lig_kodu in ESPN_SLUG:
         maclar = _cek(ESPN_SLUG[lig_kodu], ymd)
     else:
-        maclar = _cek("all", ymd)  # tüm ligler tek çağrıda
+        # tüm ligler: her birini ayrı çek (all endpoint'i güvenilmez)
+        for slug in ONEMLI_LIGLER:
+            maclar.extend(_cek(slug, ymd))
     if not maclar:
         return pd.DataFrame(columns=["Saat", "Ev", "Dep", "Skor", "Durum", "Lig"])
     df = pd.DataFrame(maclar).sort_values("tsi_dt").reset_index(drop=True)
@@ -111,3 +125,33 @@ def hafta_ozeti(gun_sayisi: int = 7, tarih=None) -> pd.DataFrame:
             n = 0
         satirlar.append({"Tarih": g, "Gün": g.strftime("%d.%m.%Y (%a)"), "Maç": n})
     return pd.DataFrame(satirlar)
+
+
+def teshis(lig_kodu="P1", tarih=None):
+    """Teşhis: ESPN'den ne dönüyor? Ham durumu string olarak döndürür."""
+    gun = pd.Timestamp(tarih) if tarih else pd.Timestamp(datetime.date.today())
+    ymd = gun.strftime("%Y%m%d")
+    slug = ESPN_SLUG.get(lig_kodu, lig_kodu)
+    url = f"{ESPN_KOK}/{slug}/scoreboard"
+    rapor = [f"İstek: {url}?dates={ymd}"]
+    try:
+        r = requests.get(url, params={"dates": ymd, "limit": 500}, headers=UA, timeout=TIMEOUT)
+        rapor.append(f"HTTP durum: {r.status_code}")
+        if r.status_code != 200:
+            rapor.append(f"Yanıt (ilk 300 karakter): {r.text[:300]}")
+            return "\n".join(rapor)
+        veri = r.json()
+        events = veri.get("events", [])
+        rapor.append(f"Event sayısı: {len(events)}")
+        ligler = veri.get("leagues", [])
+        rapor.append(f"Lig bilgisi: {ligler[0].get('name') if ligler else 'YOK (boş)'}")
+        if events:
+            ilk = events[0]
+            rapor.append(f"İlk maç: {ilk.get('name', '?')}")
+            rapor.append(f"İlk maç tarihi: {ilk.get('date', '?')}")
+            rapor.append(f"Durum: {ilk.get('status', {}).get('type', {}).get('state', '?')}")
+        else:
+            rapor.append("→ Bu tarihte bu ligde maç yok (ya da sezon dışı/veri yok)")
+    except Exception as e:
+        rapor.append(f"HATA: {type(e).__name__}: {e}")
+    return "\n".join(rapor)
