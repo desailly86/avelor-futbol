@@ -452,3 +452,78 @@ def agirlik_durumu(df: pd.DataFrame) -> dict:
         k = "%100 (olgun)"
     return {"durum": "Aktif", "kademe": k, "oynanmis": oynanmis,
             "aciklama": f"{oynanmis} maçtan öğrenildi; ağırlık etkisi {k}."}
+
+
+def tahmin_isabeti(df: pd.DataFrame, min_gecmis: int = 15) -> dict:
+    """Her maçı, yalnızca ONDAN ÖNCEKİ veriyle tahmin edip gerçekle kıyaslar.
+    Market market isabet yüzdesi döndürür (MS1, 2.5 Üst, KG Var...).
+    Bu, sistemin GERÇEK karnesidir — 'en çok hangi tahminimiz tutuyor' sorusunun cevabı.
+    Dönüş: {market: {'deneme','dogru','yuzde'}, '_genel': {...}}"""
+    d = df.dropna(subset=["FTHG", "FTAG"]).sort_values("Date").reset_index(drop=True)
+    # her maçta model bir 'en güçlü tahmin' üretir; market bazında sayaç tut
+    sayac = {}  # market_kodu: [deneme, dogru]
+    genel = [0, 0]  # tüm önerilerin toplamı
+    # Ağırlıkları bir kez (tüm sezondan) hesapla — her maçta yeniden hesaplamak çok yavaş
+    sabit_w = agirlik_sozlugu(d, min_gecmis=8) if len(d) >= 8 else {}
+
+    for i in range(len(d)):
+        m = d.iloc[i]
+        gecmis = d.iloc[:i]
+        if len(gecmis.dropna(subset=["FTHG"])) < min_gecmis:
+            continue
+        defter = takim_defteri(gecmis, m["Date"])
+        ev, dep = m["HomeTeam"], m["AwayTeam"]
+        if ev not in defter or dep not in defter:
+            continue
+        if defter[ev]["mac"] < 1 or defter[dep]["mac"] < 1:
+            continue
+        hk = hakem_defteri(gecmis, m["Date"])
+        hakem = m.get("Referee") if "Referee" in d.columns else None
+        t = mac_tahmin_puan(ev, dep, defter, hk, agirliklar=sabit_w, hakem=hakem, mac_tarihi=m["Date"])
+        if not t:
+            continue
+
+        # gerçek sonuçlar
+        eh, ea = int(m["FTHG"]), int(m["FTAG"])
+        sonuc = "1" if eh > ea else ("X" if eh == ea else "2")
+        toplam = eh + ea
+        kg = eh > 0 and ea > 0
+        iy = (m.get("HTHG", 0) + m.get("HTAG", 0)) if pd.notna(m.get("HTHG", np.nan)) else None
+        korner = (m.get("HC", 0) + m.get("AC", 0)) if pd.notna(m.get("HC", np.nan)) else None
+        kart = (m.get("HY",0)+m.get("AY",0)+m.get("HR",0)+m.get("AR",0)) if pd.notna(m.get("HY", np.nan)) else None
+
+        # her market için: model 'evet' diyor mu (>=50) ve gerçek ne?
+        kontroller = {
+            "1": (t.get("1",0) >= max(t.get("X",0), t.get("2",0)) and t.get("1",0) >= 40, sonuc == "1"),
+            "2": (t.get("2",0) >= max(t.get("X",0), t.get("1",0)) and t.get("2",0) >= 40, sonuc == "2"),
+            "1X": (t.get("1X",0) >= 60, sonuc in ("1","X")),
+            "X2": (t.get("X2",0) >= 60, sonuc in ("X","2")),
+            "ust25": (t.get("ust25",0) >= 55, toplam >= 3),
+            "alt25": (t.get("alt25",0) >= 55, toplam <= 2),
+            "kg_var": (t.get("kg_var",0) >= 55, kg),
+            "kg_yok": (t.get("kg_yok",0) >= 55, not kg),
+        }
+        if iy is not None:
+            kontroller["iy_ust"] = (t.get("iy_ust",0) >= 55, iy >= 1)
+        if korner is not None:
+            kontroller["korner_ust"] = (t.get("korner_ust",0) >= 55, korner >= 9)
+        if kart is not None:
+            kontroller["kart_ust"] = (t.get("kart_ust",0) >= 55, kart >= 4)
+
+        for market, (onerdi, gercek) in kontroller.items():
+            if not onerdi:
+                continue  # model bu maçta bu marketi önermedi → sayma
+            if market not in sayac:
+                sayac[market] = [0, 0]
+            sayac[market][0] += 1
+            sayac[market][1] += bool(gercek)
+            genel[0] += 1
+            genel[1] += bool(gercek)
+
+    sonuc_rapor = {}
+    for market, (deneme, dogru) in sayac.items():
+        sonuc_rapor[market] = {"deneme": deneme, "dogru": dogru,
+                               "yuzde": round(dogru / deneme * 100, 1) if deneme else 0.0}
+    sonuc_rapor["_genel"] = {"deneme": genel[0], "dogru": genel[1],
+                             "yuzde": round(genel[1] / genel[0] * 100, 1) if genel[0] else 0.0}
+    return sonuc_rapor
