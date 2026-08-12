@@ -86,6 +86,9 @@ with st.sidebar:
     st.write("---")
     st.caption("Hiçbir model kazanç garantisi vermez; bahis şirketi marjı her orana gömülüdür. "
                "Sezon başında veri az → tahminler zayıf, bu normaldir.")
+    st.markdown("<div style='text-align:center; color:var(--kursun); font-size:11px; "
+                "margin-top:18px; padding-top:12px; border-top:1px solid var(--cizgi);'>"
+                "◆ AVELOR Software 2026</div>", unsafe_allow_html=True)
 
 @st.cache_data(show_spinner=False)
 def _isabet_hesapla(kod, mac_sayisi):
