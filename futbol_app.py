@@ -159,7 +159,7 @@ if menu == "Dashboard":
     c3.markdown(f"<div class='kutu'><div class='etiket'>Kriter Havuzu</div>"
                 f"<div class='buyuk'>{len(KRITER_TANIM)}</div></div>", unsafe_allow_html=True)
     genel_isabet = None
-    if df is not None and len(df.dropna(subset=["FTHG"])) >= 15:
+    if df is not None and len(df.dropna(subset=["FTHG"])) >= 3:
         try:
             rap = _isabet_hesapla(st.session_state["lig_kod"], len(df.dropna(subset=["FTHG"])))
             genel_isabet = rap.get("_genel")
@@ -451,10 +451,13 @@ elif menu == "Tahmin Karnesi":
         st.info("Önce **Tahmin** ekranından ligi seçip veriyi çekin.")
     else:
         oynanmis = df.dropna(subset=["FTHG"])
-        if len(oynanmis) < 15:
-            st.warning(f"⚠️ Sadece {len(oynanmis)} maç oynanmış. Tahmin karnesi için en az 15 maç "
-                       "gerekir (anlamlı sonuç için 50+). Sezon ilerledikçe bu tablo dolacak.")
+        if len(oynanmis) == 0:
+            st.info("Bu ligde bu sezon henüz maç oynanmamış — karne için veri yok.")
         else:
+            if len(oynanmis) < 30:
+                st.warning(f"⚠️ Sadece {len(oynanmis)} maç var. Karne hesaplanacak ama az veriyle "
+                           "yüzdeler oynak ve güvenilmez olur — anlamlı sonuç için 50-100+ maç ideal. "
+                           "Yine de ne varsa gösteriyoruz.")
             st.caption(f"⏱️ Hesaplama {len(oynanmis)} maçı tek tek yeniden tahmin eder — "
                        "birkaç dakika sürebilir, sabırlı olun. Sonuç önbelleğe alınır, "
                        "ikinci açılışta anında gelir.")
