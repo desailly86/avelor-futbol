@@ -204,95 +204,127 @@ if menu == "Dashboard":
         kc1, kc2, kc3 = st.columns(3)
         if kc1.button("🔌 Bağlantıyı test et"):
             st.info(kayit.baglanti_testi(API_URL))
-        if kc2.button("📥 Bu haftanın tahminlerini kaydet", type="primary"):
-            if df is None:
-                st.warning("Önce Tahmin ekranından bir lig verisi çek.")
-            else:
-                with st.spinner("Bu haftanın maçları tahmin edilip kaydediliyor…"):
-                    try:
-                        # önümüzdeki 7 günün maçlarını ESPN'den al, tahmin et, kaydet
-                        defter = takim_defteri(df, df["Date"].max() + pd.Timedelta(days=1))
-                        hk = hakem_defteri(df, df["Date"].max() + pd.Timedelta(days=1))
+        if kc2.button("📥 TÜM liglerin bu hafta tahminlerini kaydet", type="primary"):
+            with st.spinner("Tüm ligler taranıyor, maçlar tahmin edilip kaydediliyor… (birkaç dakika)"):
+                try:
+                    ilerleme = st.empty()
+                    toplam_kayit = []
+                    lig_listesi = list(ANA_LIGLER.keys())
+                    for li, lkod in enumerate(lig_listesi):
+                        ilerleme.caption(f"({li+1}/{len(lig_listesi)}) {TUM_LIGLER[lkod]} işleniyor…")
+                        # o ligin verisini çek + ağırlık
+                        try:
+                            veri = lig_verisi_cek(lkod, 1)
+                        except Exception:
+                            continue
+                        if veri.empty or len(veri.dropna(subset=["FTHG"])) == 0:
+                            continue
+                        wl = agirlik_sozlugu(veri)
+                        defter = takim_defteri(veri, veri["Date"].max() + pd.Timedelta(days=1))
+                        hk = hakem_defteri(veri, veri["Date"].max() + pd.Timedelta(days=1))
                         mevcut = [k for k in defter if not k.startswith("_")]
-                        def esle(ad):
-                            if ad in mevcut: return ad
+                        def esle(ad, mv=mevcut):
+                            if ad in mv: return ad
                             ilk = ad.split()[0].lower() if ad else ""
-                            for t in mevcut:
-                                if ilk and (ilk in t.lower() or t.lower().split()[0] in ad.lower()):
-                                    return t
+                            for tt in mv:
+                                if ilk and (ilk in tt.lower() or tt.lower().split()[0] in ad.lower()):
+                                    return tt
                             return None
-                        kayit_listesi = []
+                        # önümüzdeki 7 günün maçları
                         for i in range(7):
                             g = datetime.date.today() + datetime.timedelta(days=i)
-                            for _, mc in gunun_maclari(tarih=g, lig_kodu=st.session_state["lig_kod"]).iterrows():
+                            try:
+                                mlar = gunun_maclari(tarih=g, lig_kodu=lkod)
+                            except Exception:
+                                continue
+                            for _, mc in mlar.iterrows():
                                 ev_e, dep_e = esle(mc["Ev"]), esle(mc["Dep"])
                                 if not ev_e or not dep_e or ev_e == dep_e:
                                     continue
-                                t = mac_tahmin_puan(ev_e, dep_e, defter, hk, agirliklar=W)
+                                t = mac_tahmin_puan(ev_e, dep_e, defter, hk, agirliklar=wl)
                                 if not t:
                                     continue
                                 for mk in MARKET_ETIKET:
                                     if mk in t and isinstance(t[mk], (int, float)):
-                                        kayit_listesi.append({
-                                            "lig": st.session_state["lig_kod"],
-                                            "ev": mc["Ev"], "dep": mc["Dep"], "tarih": str(g),
-                                            "market": mk, "tahmin_yuzde": t[mk]})
-                        if kayit_listesi:
-                            sonuc = kayit.tahmin_kaydet(API_URL, kayit_listesi)
-                            if "eklenen" in sonuc:
-                                st.success(f"✅ {sonuc['eklenen']} yeni tahmin kaydedildi "
-                                           f"({len(kayit_listesi)} denendi, gerisi zaten kayıtlıydı).")
-                            else:
-                                st.error(f"Kayıt hatası: {sonuc}")
+                                        toplam_kayit.append({
+                                            "lig": lkod, "ev": mc["Ev"], "dep": mc["Dep"],
+                                            "tarih": str(g), "market": mk, "tahmin_yuzde": t[mk]})
+                    ilerleme.caption("Kaydediliyor…")
+                    if toplam_kayit:
+                        sonuc = kayit.tahmin_kaydet(API_URL, toplam_kayit)
+                        if "eklenen" in sonuc:
+                            ilerleme.empty()
+                            st.success(f"✅ Tüm ligler tarandı! {sonuc['eklenen']} yeni tahmin kaydedildi "
+                                       f"({len(toplam_kayit)} denendi, gerisi zaten kayıtlıydı).")
                         else:
-                            st.info("Bu hafta kaydedilecek tahmin bulunamadı (maç yok ya da "
-                                    "takım eşleşmedi).")
-                    except Exception as e:
-                        st.error(f"Kayıt sırasında hata: {e}")
-        if kc3.button("✅ Oynanan maçların sonuçlarını güncelle"):
-            if df is None:
-                st.warning("Önce ligin güncel verisini çek (oynanmış maçlar için).")
-            else:
-                with st.spinner("Kayıtlı tahminler oynanan maçlarla eşleştiriliyor…"):
-                    try:
-                        okundu = kayit.kayitlari_oku(API_URL)
-                        kayitlar = okundu.get("kayitlar", [])
-                        oynanmis = df.dropna(subset=["FTHG", "FTAG"])
-                        sonuc_sozluk = {}
+                            st.error(f"Kayıt hatası: {sonuc}")
+                    else:
+                        ilerleme.empty()
+                        st.info("Bu hafta hiçbir ligde kaydedilecek maç bulunamadı (maç yok ya da "
+                                "takımların henüz verisi yok).")
+                except Exception as e:
+                    st.error(f"Kayıt sırasında hata: {e}")
+        if kc3.button("✅ TÜM liglerin oynanan maç sonuçlarını güncelle"):
+            with st.spinner("Tüm liglerin oynanan maçları kayıtlı tahminlerle eşleştiriliyor…"):
+                try:
+                    okundu = kayit.kayitlari_oku(API_URL)
+                    kayitlar = okundu.get("kayitlar", [])
+                    if not kayitlar:
+                        st.info("Sheet'te kayıtlı tahmin yok. Önce tahminleri kaydet.")
+                    else:
+                        # sonuçlanmamış kayıtların hangi liglerde olduğunu bul
+                        bekleyen_ligler = set()
                         for k in kayitlar:
-                            if k.get("tuttu") not in ("", None):
-                                continue  # zaten sonuçlanmış
-                            # bu tahmine ait maçı oynanmışlarda bul (ev/dep adıyla, gevşek)
-                            for _, m in oynanmis.iterrows():
-                                if (str(k["ev"]).split()[0].lower() in str(m["HomeTeam"]).lower() and
-                                    str(k["dep"]).split()[0].lower() in str(m["AwayTeam"]).lower()):
-                                    eh, ea = int(m["FTHG"]), int(m["FTAG"])
-                                    snc = "1" if eh>ea else ("X" if eh==ea else "2")
-                                    tp = eh+ea; kg = eh>0 and ea>0
-                                    mk = k["market"]
-                                    tuttu = None
-                                    if mk=="1": tuttu = snc=="1"
-                                    elif mk=="2": tuttu = snc=="2"
-                                    elif mk=="X": tuttu = snc=="X"
-                                    elif mk=="1X": tuttu = snc in ("1","X")
-                                    elif mk=="X2": tuttu = snc in ("X","2")
-                                    elif mk=="ust25": tuttu = tp>=3
-                                    elif mk=="alt25": tuttu = tp<=2
-                                    elif mk=="kg_var": tuttu = kg
-                                    elif mk=="kg_yok": tuttu = not kg
-                                    if tuttu is not None:
-                                        sonuc_sozluk[k["id"]] = {"sonuc": f"{eh}-{ea}", "tuttu": bool(tuttu)}
-                                    break
+                            if k.get("tuttu") in ("", None):
+                                bekleyen_ligler.add(k.get("lig"))
+                        ilerleme = st.empty()
+                        sonuc_sozluk = {}
+                        for lkod in bekleyen_ligler:
+                            ilerleme.caption(f"{TUM_LIGLER.get(lkod, lkod)} sonuçları çekiliyor…")
+                            try:
+                                veri = lig_verisi_cek(lkod, 1)
+                            except Exception:
+                                continue
+                            oynanmis = veri.dropna(subset=["FTHG", "FTAG"])
+                            if oynanmis.empty:
+                                continue
+                            for k in kayitlar:
+                                if k.get("lig") != lkod or k.get("tuttu") not in ("", None):
+                                    continue
+                                for _, m in oynanmis.iterrows():
+                                    if (str(k["ev"]).split()[0].lower() in str(m["HomeTeam"]).lower() and
+                                        str(k["dep"]).split()[0].lower() in str(m["AwayTeam"]).lower()):
+                                        eh, ea = int(m["FTHG"]), int(m["FTAG"])
+                                        snc = "1" if eh>ea else ("X" if eh==ea else "2")
+                                        tp = eh+ea; kg = eh>0 and ea>0
+                                        mk = k["market"]; tuttu = None
+                                        if mk=="1": tuttu = snc=="1"
+                                        elif mk=="2": tuttu = snc=="2"
+                                        elif mk=="X": tuttu = snc=="X"
+                                        elif mk=="1X": tuttu = snc in ("1","X")
+                                        elif mk=="X2": tuttu = snc in ("X","2")
+                                        elif mk=="ust25": tuttu = tp>=3
+                                        elif mk=="alt25": tuttu = tp<=2
+                                        elif mk=="kg_var": tuttu = kg
+                                        elif mk=="kg_yok": tuttu = not kg
+                                        if tuttu is not None:
+                                            sonuc_sozluk[k["id"]] = {"sonuc": f"{eh}-{ea}", "tuttu": bool(tuttu)}
+                                        break
+                        ilerleme.caption("Sonuçlar Sheet'e yazılıyor…")
                         if sonuc_sozluk:
                             snc = kayit.sonuc_guncelle(API_URL, sonuc_sozluk)
+                            ilerleme.empty()
                             if "guncellenen" in snc:
-                                st.success(f"✅ {snc['guncellenen']} tahmin sonuçlandırıldı.")
+                                st.success(f"✅ {snc['guncellenen']} tahmin sonuçlandırıldı. "
+                                           "Karne ve Dashboard yüzdesi güncellendi.")
                             else:
                                 st.error(f"Güncelleme hatası: {snc}")
                         else:
-                            st.info("Eşleşen yeni oynanmış maç bulunamadı.")
-                    except Exception as e:
-                        st.error(f"Güncelleme sırasında hata: {e}")
+                            ilerleme.empty()
+                            st.info("Eşleşen yeni oynanmış maç bulunamadı (maçlar henüz oynanmadı "
+                                    "ya da takım adları eşleşmedi).")
+                except Exception as e:
+                    st.error(f"Güncelleme sırasında hata: {e}")
 
     st.write("")
     st.markdown("### 🗓️ Bugünün maçları")
