@@ -12,7 +12,7 @@ import datetime
 import hashlib
 import requests
 
-TIMEOUT = 25
+TIMEOUT = 60
 
 
 def _mac_id(lig, ev, dep, tarih):
@@ -35,12 +35,21 @@ def tahmin_kaydet(api_url, tahmin_listesi):
             "ev": t["ev"], "dep": t["dep"],
             "market": t["market"], "tahmin_yuzde": t["tahmin_yuzde"],
         })
+    # Çok fazla kayıt tek istekte timeout'a yol açar → 150'lik parçalara böl
+    toplam_eklenen = 0
     try:
-        r = requests.post(api_url, json={"islem": "tahmin_kaydet", "tahminler": kayitlar},
-                          timeout=TIMEOUT)
-        return r.json()
+        for bas in range(0, len(kayitlar), 150):
+            parca = kayitlar[bas:bas + 150]
+            r = requests.post(api_url, json={"islem": "tahmin_kaydet", "tahminler": parca},
+                              timeout=TIMEOUT)
+            sonuc = r.json()
+            if "eklenen" in sonuc:
+                toplam_eklenen += sonuc["eklenen"]
+            elif "hata" in sonuc:
+                return {"hata": sonuc["hata"], "kismi_eklenen": toplam_eklenen}
+        return {"durum": "ok", "eklenen": toplam_eklenen}
     except Exception as e:
-        return {"hata": str(e)}
+        return {"hata": str(e), "kismi_eklenen": toplam_eklenen}
 
 
 def sonuc_guncelle(api_url, sonuc_sozlugu):
