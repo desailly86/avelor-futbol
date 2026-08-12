@@ -525,31 +525,60 @@ elif menu == "Puan Durumu":
 # ============================================================ BAHİS ORANLARI
 elif menu == "Bahis Oranları":
     st.markdown("# 💱 Bahis Oranları")
-    st.caption("15-16 firma ortalaması — **bizim tahminimiz DEĞİL**, piyasa oranı. 1X2 + Alt/Üst 2.5.")
-    if st.session_state.get("lig_kod") != lig_kod or df is None:
-        st.info("Önce **Tahmin** ekranından ligi seçip veriyi çekin.")
-    else:
-        if st.button("💱 Yaklaşan maçların oranlarını getir", type="primary"):
+    st.caption("15-16 firma ortalaması — **bizim tahminimiz DEĞİL**, piyasanın oranı. "
+               "1X2 + Alt/Üst 2.5. Kaynak: football-data.co.uk (haftalık güncel fikstür).")
+
+    simdi = tsi_simdi_dt()
+    oc1, oc2 = st.columns([1, 1])
+    oran_gun = oc1.date_input("Gün seç", value=simdi.date(), format="DD.MM.YYYY",
+                              key="oran_gun_sec")
+    oc2.write(""); oc2.write("")
+    if oc2.button("💱 Bu günün maçları ve oranlarını getir", type="primary",
+                  use_container_width=True):
+        with st.spinner("Fikstür ve oranlar çekiliyor…"):
             try:
-                st.session_state["oran_fikstur"] = fikstur_cek(lig_kod)
+                # tüm ligler, sadece_gelecek=False (seçili günü serbestçe süzelim)
+                fx = fikstur_cek(kod=None, sadece_gelecek=False)
+                st.session_state["oran_fikstur"] = fx
+                st.session_state["oran_gun_secili"] = oran_gun
             except Exception as e:
-                st.error(f"Oranlar çekilemedi: {e}")
-        fx = st.session_state.get("oran_fikstur", pd.DataFrame())
-        if not fx.empty:
+                st.error(f"Çekilemedi: {e}")
+
+    fx = st.session_state.get("oran_fikstur", pd.DataFrame())
+    if not fx.empty:
+        gun = st.session_state.get("oran_gun_secili", oran_gun)
+        if "Date" in fx.columns:
+            fx = fx[fx["Date"] == pd.Timestamp(gun)]
+        if fx.empty:
+            st.info(f"**{gun:%d.%m.%Y}** için maç bulunamadı. football-data fikstürü genelde "
+                    "hafta sonu maçlarını Cuma öğleden sonra yayınlar; ileri tarihli maçlar "
+                    "için o günü bekleyin ya da farklı gün seçin.")
+        else:
             import re as _re
             satirlar = []
             for _, m in fx.iterrows():
-                h = [m[c] for c in fx.columns if _re.search(r'[A-Za-z]+H$', str(c)) and pd.notna(m.get(c))]
-                dd = [m[c] for c in fx.columns if _re.search(r'[A-Za-z]+D$', str(c)) and pd.notna(m.get(c))]
-                a = [m[c] for c in fx.columns if _re.search(r'[A-Za-z]+A$', str(c)) and pd.notna(m.get(c))]
-                satirlar.append({"Tarih": m["Date"].strftime("%d.%m") if pd.notna(m.get("Date")) else "",
-                                 "Ev": m["HomeTeam"], "Dep": m["AwayTeam"],
-                                 "1 (ort)": round(float(np.mean(h)), 2) if h else "-",
-                                 "X (ort)": round(float(np.mean(dd)), 2) if dd else "-",
-                                 "2 (ort)": round(float(np.mean(a)), 2) if a else "-"})
-            st.dataframe(pd.DataFrame(satirlar), hide_index=True, use_container_width=True)
-        else:
-            st.info("Yaklaşan maç bulunamadı.")
+                h = [m[c] for c in fx.columns if _re.search(r'[A-Za-z0-9]+H$', str(c)) and pd.notna(m.get(c)) and isinstance(m.get(c), (int, float))]
+                dd = [m[c] for c in fx.columns if _re.search(r'[A-Za-z0-9]+D$', str(c)) and pd.notna(m.get(c)) and isinstance(m.get(c), (int, float))]
+                a = [m[c] for c in fx.columns if _re.search(r'[A-Za-z0-9]+A$', str(c)) and pd.notna(m.get(c)) and isinstance(m.get(c), (int, float))]
+                # 2.5 alt/üst oranları (football-data: >2.5=Avg>2.5, <2.5=Avg<2.5 ya da B365>2.5)
+                ust = [m[c] for c in fx.columns if ">2.5" in str(c) and pd.notna(m.get(c)) and isinstance(m.get(c), (int, float))]
+                alt = [m[c] for c in fx.columns if "<2.5" in str(c) and pd.notna(m.get(c)) and isinstance(m.get(c), (int, float))]
+                lig_ad = TUM_LIGLER.get(m.get("Div"), m.get("Div", ""))
+                satirlar.append({
+                    "Saat": m.get("Saat_TSI", "") if pd.notna(m.get("Saat_TSI")) else "",
+                    "Lig": lig_ad, "Ev": m["HomeTeam"], "Dep": m["AwayTeam"],
+                    "1": round(float(np.mean(h)), 2) if h else "-",
+                    "X": round(float(np.mean(dd)), 2) if dd else "-",
+                    "2": round(float(np.mean(a)), 2) if a else "-",
+                    "2.5 Üst": round(float(np.mean(ust)), 2) if ust else "-",
+                    "2.5 Alt": round(float(np.mean(alt)), 2) if alt else "-"})
+            tablo = pd.DataFrame(satirlar)
+            st.markdown(f"**{gun:%d.%m.%Y} — {len(tablo)} maç**")
+            st.dataframe(tablo, hide_index=True, use_container_width=True, height=560)
+            st.caption("Oranlar 15-16 bahis firmasının ortalamasıdır. '-' → o maç için kaynakta "
+                       "henüz oran yok (maç çok ileri tarihli olabilir).")
+    else:
+        st.info("Yukarıdan gün seçip **oranları getir**'e bas.")
 
 # ============================================================ KRİTER KARNESİ
 elif menu == "Kriter Karnesi":
