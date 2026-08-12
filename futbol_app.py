@@ -193,23 +193,7 @@ if menu == "Dashboard":
                     f"<div class='buyuk' style='font-size:18px'>Henüz yok</div></div>", unsafe_allow_html=True)
     st.write("")
     if df is None:
-        st.info("Başlamak için **Tahmin** ekranından bir lig seçip veriyi çekin. "
-                "Ardından burada özet, aşağıda günün maçları görünür.")
-    else:
-        sol, sag = st.columns(2)
-        with sol:
-            st.markdown("### 📊 Puan durumu (ilk 5)")
-            pd_tablo = puan_durumu(df, "genel").head(5)
-            st.dataframe(pd_tablo[["Sıra", "Takım", "O", "P"]], hide_index=True, use_container_width=True)
-        with sag:
-            st.markdown("### 🔬 Öne çıkan kriterler")
-            if W:
-                en_iyi = sorted(W.items(), key=lambda x: -x[1])[:5]
-                ad = {k[0]: k[1] for k in KRITER_TANIM}
-                st.dataframe(pd.DataFrame([{"Kriter": ad.get(k, k), "Ağırlık": v} for k, v in en_iyi]),
-                             hide_index=True, use_container_width=True)
-            else:
-                st.caption("Ağırlıklar henüz hesaplanmadı (veri az).")
+        st.info("Başlamak için **Tahmin** ekranından bir lig seçip veriyi çekin.")
     st.write("")
     # ---- Kalıcı tahmin kaydı (Google Sheets) ----
     st.markdown("### 💾 Tahmin Kaydı")
@@ -490,23 +474,53 @@ elif menu == "Günün Bülteni":
 
 elif menu == "Puan Durumu":
     st.markdown("# 📊 Puan Durumu")
-    st.caption("2026/27 — genel, iç saha, deplasman. Tek sezon.")
-    if df is None:
-        st.info("Önce **Tahmin** ekranından ligi seçip veriyi çekin.")
+    st.caption("2026/27 tek sezon — genel, iç saha, deplasman. Ligi seç, verisini çek.")
+
+    pc1, pc2 = st.columns([2, 1])
+    puan_lig = pc1.selectbox("Lig seç", list(TUM_LIGLER.keys()),
+                             format_func=lambda k: TUM_LIGLER[k],
+                             key="puan_lig_sec")
+    pc2.write(""); pc2.write("")
+    if pc2.button("📥 Bu ligin verisini çek", type="primary", use_container_width=True):
+        with st.spinner(f"{TUM_LIGLER[puan_lig]} yükleniyor…"):
+            try:
+                veri = lig_verisi_cek(puan_lig, 1)
+                # bu ekrana özel sakla (kenar menü/Tahmin verisiyle karışmasın)
+                st.session_state["puan_df"] = veri
+                st.session_state["puan_df_lig"] = puan_lig
+                oyn = len(veri.dropna(subset=["FTHG"]))
+                st.success(f"✅ {TUM_LIGLER[puan_lig]}: {oyn} maç yüklendi.")
+            except Exception as e:
+                st.error(f"Yüklenemedi: {e}")
+
+    dfp = st.session_state.get("puan_df")
+    # Yüklü veri, ŞU AN seçili ligle eşleşiyor mu? Eşleşmiyorsa eski veriyi GÖSTERME.
+    if dfp is None or st.session_state.get("puan_df_lig") != puan_lig:
+        if dfp is not None:
+            st.info(f"Seçili lig **{TUM_LIGLER[puan_lig]}** ama yüklü veri "
+                    f"**{TUM_LIGLER.get(st.session_state.get('puan_df_lig'), '?')}**. "
+                    "Doğru puan durumu için **Bu ligin verisini çek**'e bas.")
+        else:
+            st.info("Yukarıdan ligi seçip **Bu ligin verisini çek**'e bas.")
     else:
-        s1, s2, s3, s4 = st.tabs(["🏆 Genel", "🏠 İç Saha", "✈️ Deplasman", "📅 Son Maçlar"])
-        with s1:
-            st.dataframe(puan_durumu(df, "genel"), hide_index=True, use_container_width=True, height=560)
-        with s2:
-            st.dataframe(puan_durumu(df, "ic"), hide_index=True, use_container_width=True, height=560)
-        with s3:
-            st.dataframe(puan_durumu(df, "dis"), hide_index=True, use_container_width=True, height=560)
-        with s4:
-            sonuc = son_mac_sonuclari(df, gun=21)
-            if not sonuc.empty:
-                st.dataframe(sonuc, hide_index=True, use_container_width=True, height=560)
-            else:
-                st.info("Son 3 haftada maç yok.")
+        oyn = len(dfp.dropna(subset=["FTHG"]))
+        st.caption(f"**{TUM_LIGLER[puan_lig]}** · {oyn} oynanmış maç")
+        if oyn == 0:
+            st.warning("Bu ligde bu sezon henüz maç oynanmamış — puan durumu boş.")
+        else:
+            s1, s2, s3, s4 = st.tabs(["🏆 Genel", "🏠 İç Saha", "✈️ Deplasman", "📅 Son Maçlar"])
+            with s1:
+                st.dataframe(puan_durumu(dfp, "genel"), hide_index=True, use_container_width=True, height=560)
+            with s2:
+                st.dataframe(puan_durumu(dfp, "ic"), hide_index=True, use_container_width=True, height=560)
+            with s3:
+                st.dataframe(puan_durumu(dfp, "dis"), hide_index=True, use_container_width=True, height=560)
+            with s4:
+                sonuc = son_mac_sonuclari(dfp, gun=21)
+                if not sonuc.empty:
+                    st.dataframe(sonuc, hide_index=True, use_container_width=True, height=560)
+                else:
+                    st.info("Son 3 haftada maç yok.")
 
 # ============================================================ BAHİS ORANLARI
 elif menu == "Bahis Oranları":
