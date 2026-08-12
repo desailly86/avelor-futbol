@@ -13,8 +13,9 @@ import pandas as pd
 import streamlit as st
 
 from futbol_veri import (TUM_LIGLER, ANA_LIGLER, lig_verisi_cek, fikstur_cek,
-                         gunun_bulteni, fikstur_gunleri, sezon_etiketi)
+                         sezon_etiketi)
 from futbol_tablo import puan_durumu, son_mac_sonuclari
+from futbol_bulten import gunun_maclari, hafta_ozeti, ESPN_SLUG
 from futbol_kriter import (takim_defteri, hakem_defteri, mac_tahmin_puan,
                            en_iyi_uc, agirlik_sozlugu, agirlik_durumu, MARKET_ETIKET,
                            kriter_karne, KRITER_TANIM)
@@ -182,81 +183,68 @@ if menu == "Dashboard":
     st.markdown("### 🗓️ Bugünün maçları")
     if st.button("Bugünün programını getir"):
         try:
-            st.session_state["dash_bulten"] = gunun_bulteni(sadece_kalan=True, tsi_simdi=simdi)
+            st.session_state["dash_bulten"] = gunun_maclari(tarih=simdi.date())
         except Exception as e:
             st.error(f"Çekilemedi: {e}")
     bd = st.session_state.get("dash_bulten")
     if bd is not None and not bd.empty:
         for _, m in bd.head(15).iterrows():
-            st.markdown(f"<div class='mac' style='padding:6px 14px'><b>{m.get('Saat_TSI','--:--')}</b> "
-                        f"&nbsp; {m['HomeTeam']} — {m['AwayTeam']}"
-                        f"<span class='etiket'> &nbsp; {m.get('Lig','')}</span></div>", unsafe_allow_html=True)
+            skor = m["Skor"]
+            orta = f" <b style='color:#B00'>{skor}</b> " if skor else " — "
+            st.markdown(f"<div class='mac' style='padding:6px 14px'><b>{m['Saat']}</b> "
+                        f"&nbsp; {m['Ev']}{orta}{m['Dep']}"
+                        f"<span class='etiket'> &nbsp; {m['Lig']}</span></div>", unsafe_allow_html=True)
     elif bd is not None:
-        st.info("Bugün kalan maç yok.")
+        st.info("Bugün maç yok ya da kaynak yanıt vermedi.")
 
 # ============================================================ GÜNÜN BÜLTENİ (takvimli)
 elif menu == "Günün Bülteni":
-    st.markdown("# 🗓️ Günün Bülteni")
+    st.markdown("# 🗓️ Maç Bülteni")
     simdi = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
-    st.caption(f"TSİ {simdi:%H:%M} · Bugün {simdi:%d.%m.%Y}. Bir gün seçip o günün maçlarını gör. "
-               "**Not:** Kaynak, ileri tarihli fikstürü genelde 3-5 gün önceden yayınlar; "
-               "çok ileri bir gün seçersen henüz maç görünmeyebilir.")
+    st.caption(f"TSİ {simdi:%H:%M} · Canlı maç programı (ESPN). Tüm dünyanın gördüğü fikstür — "
+               "tarih seç, ligi seç, maçları gör. Oynanan maçlarda skor ve 🔴 CANLI durumu görünür.")
 
-    # Hangi günlerde maç var? (kaynak fikstüründen özet — kullanıcı kör seçmesin)
-    if st.button("📅 Önümüzdeki günlerde maç olan tarihleri göster"):
-        try:
-            gunler = fikstur_gunleri(21)
-            if gunler.empty:
-                st.warning("Kaynak fikstür dosyasında yaklaşan maç bulunamadı. Hafta ortasında "
-                           "(genelde Salı-Çarşamba) hafta sonu maçları dosyaya düşer.")
-            else:
-                gunler["Gün"] = gunler["Date"].dt.strftime("%d.%m.%Y (%a)")
-                st.dataframe(gunler[["Gün", "mac_sayisi"]].rename(
-                    columns={"mac_sayisi": "Maç sayısı"}), hide_index=True, use_container_width=True)
-                st.caption("↑ Bu tarihlerden birini aşağıdaki takvimden seçersen maçlar gelir.")
-        except Exception as e:
-            st.error(f"Tarih özeti çekilemedi: {e}")
-
-    c1, c2 = st.columns([1, 1])
-    secili_gun = c1.date_input("Gün seç", value=simdi.date(),
-                               min_value=simdi.date() - datetime.timedelta(days=7),
-                               max_value=simdi.date() + datetime.timedelta(days=21),
+    c1, c2, c3 = st.columns([1, 1, 1])
+    secili_gun = c1.date_input("Tarih", value=simdi.date(),
+                               min_value=simdi.date() - datetime.timedelta(days=30),
+                               max_value=simdi.date() + datetime.timedelta(days=30),
                                format="DD.MM.YYYY")
-    bugun_mu = secili_gun == simdi.date()
-    sadece_kalan = c2.toggle("Sadece kalan maçlar", value=True, disabled=not bugun_mu,
-                             help="Yalnızca bugün için geçerli")
-    if st.button("🗓️ Seçili günün maçlarını getir", type="primary", use_container_width=True):
-        with st.spinner("Program çekiliyor…"):
-            try:
-                st.session_state["bulten"] = gunun_bulteni(
-                    sadece_kalan=sadece_kalan and bugun_mu, tsi_simdi=simdi,
-                    secili_gun=secili_gun, gecmis_df=df)
-                st.session_state["bulten_gun"] = secili_gun
-            except Exception as e:
-                st.error(f"Bülten çekilemedi: {e}")
-    b = st.session_state.get("bulten")
-    if b is not None:
-        secilen = st.session_state.get("bulten_gun", secili_gun)
-        if b.empty:
-            st.info(f"**{secilen:%d.%m.%Y}** için maç bulunamadı. Olası sebepler: (1) o gün "
-                    "hiç maç yok, (2) ileri tarihli fikstür henüz kaynağa düşmemiş (3-5 gün "
-                    "önceden gelir), (3) geçmiş bir gün seçtiysen o günün sonuçları yalnızca "
-                    "yüklü ligin verisinde bulunur — üstteki '📅 tarihleri göster' ile hangi "
-                    "günlerde maç olduğunu görebilirsin.")
-        else:
-            st.markdown(f"**{secilen:%d.%m.%Y} — {len(b)} maç**")
-            for _, m in b.iterrows():
-                skor = m.get("Skor", "")
-                orta = f" <b>{skor}</b> " if skor else " — "
-                oran = ""
-                if not skor and pd.notna(m.get("B365H")):
-                    oran = f" · {m['B365H']}/{m.get('B365D','-')}/{m.get('B365A','-')}"
-                st.markdown(f"<div class='mac' style='padding:8px 14px'>"
-                            f"<b>{m.get('Saat_TSI','--:--')}</b> &nbsp; {m['HomeTeam']}{orta}{m['AwayTeam']}"
-                            f"<span class='etiket'> &nbsp; {m.get('Lig','')}{oran}</span></div>",
-                            unsafe_allow_html=True)
+    lig_secim = c2.selectbox("Lig", ["Tüm ligler"] + list(TUM_LIGLER.keys()),
+                             format_func=lambda k: "🌍 Tüm ligler" if k == "Tüm ligler" else TUM_LIGLER[k])
+    c3.write(""); c3.write("")
+    getir = c3.button("🗓️ Maçları getir", type="primary", use_container_width=True)
 
-# ============================================================ PROGRAM
+    if getir:
+        with st.spinner("Maç programı çekiliyor (ESPN)…"):
+            try:
+                kod = None if lig_secim == "Tüm ligler" else lig_secim
+                st.session_state["espn_bulten"] = gunun_maclari(tarih=secili_gun, lig_kodu=kod)
+                st.session_state["espn_gun"] = secili_gun
+            except Exception as e:
+                st.error(f"Maçlar çekilemedi: {e}")
+
+    b = st.session_state.get("espn_bulten")
+    if b is not None:
+        g = st.session_state.get("espn_gun", secili_gun)
+        if b.empty:
+            st.info(f"**{g:%d.%m.%Y}** için maç bulunamadı. O gün seçili ligde/liglerde maç "
+                    "olmayabilir. Farklı bir tarih ya da 'Tüm ligler' deneyin.")
+        else:
+            st.markdown(f"### {g:%d.%m.%Y} — {len(b)} maç")
+            # Lige göre grupla
+            for lig in b["Lig"].unique():
+                grup = b[b["Lig"] == lig]
+                st.markdown(f"**{lig}**")
+                for _, m in grup.iterrows():
+                    skor = m["Skor"]
+                    orta = f" <b style='color:#B00'>{skor}</b> " if skor else " — "
+                    durum = f" <span class='etiket'>{m['Durum']}</span>" if m['Durum'] in ("🔴 CANLI", "bitti") else ""
+                    st.markdown(f"<div class='mac' style='padding:6px 14px'>"
+                                f"<b>{m['Saat']}</b> &nbsp; {m['Ev']}{orta}{m['Dep']}{durum}</div>",
+                                unsafe_allow_html=True)
+    else:
+        st.info("Yukarıdan tarih ve lig seçip **Maçları getir**'e bas. Varsayılan: bugün, tüm ligler.")
+
 elif menu == "Program":
     st.markdown("# 📡 Program & Tahmin")
     st.caption("1) Ligi seç, veriyi çek → 2) Yaklaşan maçların tahminini gör.")
