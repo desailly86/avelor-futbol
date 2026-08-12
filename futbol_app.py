@@ -25,6 +25,16 @@ st.set_page_config(page_title="AVELOR Futbol", page_icon="⚽",
                    layout="wide", initial_sidebar_state="expanded")
 API_URL = st.secrets.get("API_URL", "")
 
+
+def tsi_simdi_dt():
+    """Türkiye saatine göre şu anki tam zaman (sunucu saati ne olursa olsun doğru)."""
+    return datetime.datetime.now(datetime.timezone.utc) + datetime.timedelta(hours=3)
+
+
+def tsi_bugun():
+    """Türkiye saatine göre bugünün tarihi."""
+    return tsi_simdi_dt().date()
+
 st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Questrial&display=swap');
@@ -149,7 +159,7 @@ def mac_karti(ev, dep, t, tarih=""):
 # ============================================================ DASHBOARD
 if menu == "Dashboard":
     st.markdown("# 🏠 Dashboard")
-    simdi = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+    simdi = tsi_simdi_dt()
     st.caption(f"AVELOR Futbol · TSİ {simdi:%H:%M} · {simdi:%d.%m.%Y} · Sezon {sezon_etiketi(simdi)}")
     c1, c2, c3, c4 = st.columns(4)
     oyn = len(df.dropna(subset=["FTHG"])) if df is not None else 0
@@ -196,6 +206,8 @@ if menu == "Dashboard":
     st.write("")
     # ---- Kalıcı tahmin kaydı (Google Sheets) ----
     st.markdown("### 💾 Tahmin Kaydı")
+    st.caption(f"Bugün (TSİ): **{tsi_bugun():%d.%m.%Y}** — kayıt yalnızca bugünün henüz "
+               "oynanmamış maçlarını kapsar.")
     if not API_URL:
         st.info("Kalıcı kayıt için Google Sheets bağlantısı gerekli. Streamlit **Secrets**'a "
                 "`API_URL` eklenmemiş görünüyor. Eklersen tahminler kalıcı saklanır ve "
@@ -204,8 +216,8 @@ if menu == "Dashboard":
         kc1, kc2, kc3 = st.columns(3)
         if kc1.button("🔌 Bağlantıyı test et"):
             st.info(kayit.baglanti_testi(API_URL))
-        if kc2.button("📥 TÜM liglerin bu hafta tahminlerini kaydet", type="primary"):
-            with st.spinner("Tüm ligler taranıyor, maçlar tahmin edilip kaydediliyor… (birkaç dakika)"):
+        if kc2.button("📥 TÜM liglerin BUGÜNKÜ tahminlerini kaydet", type="primary"):
+            with st.spinner("Tüm liglerin bugünkü maçları tahmin edilip kaydediliyor…"):
                 try:
                     ilerleme = st.empty()
                     toplam_kayit = []
@@ -230,25 +242,24 @@ if menu == "Dashboard":
                                 if ilk and (ilk in tt.lower() or tt.lower().split()[0] in ad.lower()):
                                     return tt
                             return None
-                        # önümüzdeki 7 günün maçları
-                        for i in range(7):
-                            g = datetime.date.today() + datetime.timedelta(days=i)
-                            try:
-                                mlar = gunun_maclari(tarih=g, lig_kodu=lkod)
-                            except Exception:
+                        # SADECE bugünün (TSİ) oynanmamış maçları
+                        g = tsi_bugun()
+                        try:
+                            mlar = gunun_maclari(tarih=g, lig_kodu=lkod, sadece_oynanmamis=True)
+                        except Exception:
+                            mlar = pd.DataFrame()
+                        for _, mc in mlar.iterrows():
+                            ev_e, dep_e = esle(mc["Ev"]), esle(mc["Dep"])
+                            if not ev_e or not dep_e or ev_e == dep_e:
                                 continue
-                            for _, mc in mlar.iterrows():
-                                ev_e, dep_e = esle(mc["Ev"]), esle(mc["Dep"])
-                                if not ev_e or not dep_e or ev_e == dep_e:
-                                    continue
-                                t = mac_tahmin_puan(ev_e, dep_e, defter, hk, agirliklar=wl)
-                                if not t:
-                                    continue
-                                for mk in MARKET_ETIKET:
-                                    if mk in t and isinstance(t[mk], (int, float)):
-                                        toplam_kayit.append({
-                                            "lig": lkod, "ev": mc["Ev"], "dep": mc["Dep"],
-                                            "tarih": str(g), "market": mk, "tahmin_yuzde": t[mk]})
+                            t = mac_tahmin_puan(ev_e, dep_e, defter, hk, agirliklar=wl)
+                            if not t:
+                                continue
+                            for mk in MARKET_ETIKET:
+                                if mk in t and isinstance(t[mk], (int, float)):
+                                    toplam_kayit.append({
+                                        "lig": lkod, "ev": mc["Ev"], "dep": mc["Dep"],
+                                        "tarih": str(g), "market": mk, "tahmin_yuzde": t[mk]})
                     ilerleme.caption("Kaydediliyor…")
                     if toplam_kayit:
                         sonuc = kayit.tahmin_kaydet(API_URL, toplam_kayit)
@@ -327,76 +338,48 @@ if menu == "Dashboard":
                     st.error(f"Güncelleme sırasında hata: {e}")
 
     st.write("")
-    # ---- Haftanın en güçlü tahminleri (tüm ligler taranır) ----
+    # ---- Haftanın en güçlü tahminleri (kayıtlı Sheet'ten okunur — hızlı) ----
     st.markdown("### 🔝 Haftanın En Güçlü Tahminleri")
-    st.caption("Tüm liglerin bu haftaki maçları taranır; en yüksek olasılıklı tahminler listelenir. "
-               "Tarama birkaç dakika sürebilir.")
-    if st.button("🔝 Haftanın en iyilerini hesapla"):
-        with st.spinner("Tüm ligler taranıyor, en güçlü tahminler bulunuyor…"):
+    st.caption("Sheet'e kaydedilmiş tahminlerden en yüksek olasılıklılar. Önce yukarıdan "
+               "'tahminleri kaydet' demen gerekir; sonra bu liste anında gelir.")
+    if not API_URL:
+        st.info("Kayıt bağlantısı yok — bu liste kayıtlı tahminlerden oluşur.")
+    elif st.button("🔝 En güçlü tahminleri göster"):
+        with st.spinner("Kayıtlı tahminler okunuyor…"):
             try:
-                ilerleme = st.empty()
-                havuz = []  # {lig, ev, dep, tarih, market, yuzde}
-                lig_listesi = list(ANA_LIGLER.keys())
-                for li, lkod in enumerate(lig_listesi):
-                    ilerleme.caption(f"({li+1}/{len(lig_listesi)}) {TUM_LIGLER[lkod]}…")
-                    try:
-                        veri = lig_verisi_cek(lkod, 1)
-                    except Exception:
-                        continue
-                    if veri.empty or len(veri.dropna(subset=["FTHG"])) == 0:
-                        continue
-                    wl = agirlik_sozlugu(veri)
-                    defter = takim_defteri(veri, veri["Date"].max() + pd.Timedelta(days=1))
-                    hk = hakem_defteri(veri, veri["Date"].max() + pd.Timedelta(days=1))
-                    mevcut = [k for k in defter if not k.startswith("_")]
-                    def esle(ad, mv=mevcut):
-                        if ad in mv: return ad
-                        ilk = ad.split()[0].lower() if ad else ""
-                        for tt in mv:
-                            if ilk and (ilk in tt.lower() or tt.lower().split()[0] in ad.lower()):
-                                return tt
-                        return None
-                    for i in range(7):
-                        g = datetime.date.today() + datetime.timedelta(days=i)
-                        try:
-                            mlar = gunun_maclari(tarih=g, lig_kodu=lkod)
-                        except Exception:
-                            continue
-                        for _, mc in mlar.iterrows():
-                            ev_e, dep_e = esle(mc["Ev"]), esle(mc["Dep"])
-                            if not ev_e or not dep_e or ev_e == dep_e:
-                                continue
-                            t = mac_tahmin_puan(ev_e, dep_e, defter, hk, agirliklar=wl)
-                            if not t:
-                                continue
-                            for mk in MARKET_ETIKET:
-                                if mk in t and isinstance(t[mk], (int, float)):
-                                    havuz.append({"Lig": TUM_LIGLER[lkod], "Tarih": f"{g:%d.%m}",
-                                                  "Maç": f"{mc['Ev']} - {mc['Dep']}",
-                                                  "Tahmin": MARKET_ETIKET[mk], "_kod": mk,
-                                                  "Olasılık %": t[mk]})
-                ilerleme.empty()
-                st.session_state["haftalik_havuz"] = havuz
+                okundu = kayit.kayitlari_oku(API_URL)
+                kayitlar = okundu.get("kayitlar", [])
+                # sadece HENÜZ sonuçlanmamış (yaklaşan) tahminler
+                bekleyen = [k for k in kayitlar if k.get("tuttu") in ("", None)]
+                if not bekleyen:
+                    st.info("Kayıtlı bekleyen (yaklaşan) tahmin yok. Önce 'tahminleri kaydet'.")
+                else:
+                    dfh = pd.DataFrame(bekleyen)
+                    dfh["Olasılık %"] = pd.to_numeric(dfh["tahmin_yuzde"], errors="coerce")
+                    dfh["Lig"] = dfh["lig"].map(lambda k: TUM_LIGLER.get(k, k))
+                    dfh["Maç"] = dfh["ev"] + " - " + dfh["dep"]
+                    dfh["Tahmin"] = dfh["market"].map(lambda m: MARKET_ETIKET.get(m, m))
+                    st.session_state["sheet_havuz"] = dfh
             except Exception as e:
-                st.error(f"Tarama hatası: {e}")
+                st.error(f"Okuma hatası: {e}")
 
-    havuz = st.session_state.get("haftalik_havuz")
-    if havuz:
-        dfh = pd.DataFrame(havuz)
-        sekme1, sekme2 = st.tabs(["🏆 En yüksek 20 (tüm tipler)", "⬆️ En yüksek 20 · 2.5 Üst"])
-        with sekme1:
+    dfh = st.session_state.get("sheet_havuz")
+    if dfh is not None and not dfh.empty:
+        s1, s2 = st.tabs(["🏆 En yüksek 20 (tüm tipler)", "⬆️ En yüksek 20 · 2.5 Üst"])
+        with s1:
             en20 = dfh.sort_values("Olasılık %", ascending=False).head(20)
-            st.dataframe(en20[["Tarih", "Lig", "Maç", "Tahmin", "Olasılık %"]],
-                         hide_index=True, use_container_width=True, height=560)
-        with sekme2:
-            ust = dfh[dfh["_kod"] == "ust25"].sort_values("Olasılık %", ascending=False).head(20)
+            st.dataframe(en20[["tarih", "Lig", "Maç", "Tahmin", "Olasılık %"]].rename(
+                columns={"tarih": "Tarih"}), hide_index=True, use_container_width=True, height=560)
+        with s2:
+            ust = dfh[dfh["market"] == "ust25"].sort_values("Olasılık %", ascending=False).head(20)
             if ust.empty:
-                st.info("Bu hafta 2.5 Üst tahmini bulunamadı.")
+                st.info("Kayıtlı 2.5 Üst tahmini yok.")
             else:
-                st.dataframe(ust[["Tarih", "Lig", "Maç", "Olasılık %"]],
-                             hide_index=True, use_container_width=True, height=560)
-        st.caption("⚠️ Yüksek olasılık ≠ garanti. Sezon başında az veriyle üretilen yüzdeler "
-                   "oynaktır; Tahmin Karnesi'nde hangi tahmin tipinin gerçekten tuttuğunu izle.")
+                st.dataframe(ust[["tarih", "Lig", "Maç", "Olasılık %"]].rename(
+                    columns={"tarih": "Tarih"}), hide_index=True, use_container_width=True, height=560)
+        st.caption("⚠️ Yüksek olasılık ≠ garanti, ne de en kârlı bahis. Gerçek değer, senin "
+                   "yüzdenin piyasa oranından saptığı yerdedir. Tahmin Karnesi'nde hangi tipin "
+                   "gerçekten tuttuğunu izle.")
 
     st.write("")
     st.markdown("### 🗓️ Bugünün maçları")
@@ -419,7 +402,7 @@ if menu == "Dashboard":
 # ============================================================ GÜNÜN BÜLTENİ (takvimli)
 elif menu == "Günün Bülteni":
     st.markdown("# 🗓️ Maç Bülteni")
-    simdi = datetime.datetime.utcnow() + datetime.timedelta(hours=3)
+    simdi = tsi_simdi_dt()
     st.caption(f"TSİ {simdi:%H:%M} · Canlı maç programı (ESPN). Tüm dünyanın gördüğü fikstür — "
                "tarih seç, ligi seç, maçları gör. Oynanan maçlarda skor ve 🔴 CANLI durumu görünür.")
 
@@ -579,18 +562,17 @@ elif menu == "Tahmin":
         else:
             # O ligin yaklaşan maçları (ESPN'den) + tahminleri
             st.markdown("### 📅 Yaklaşan maçlar ve tahminleri")
-            gun_sec = st.radio("Dönem", ["Bugün", "Bu hafta (7 gün)"], horizontal=True)
+            secili_tarih = st.date_input("Hangi günün maçları?", value=tsi_bugun(),
+                                         format="DD.MM.YYYY", key="tahmin_gun")
             if st.button("🎯 Maçları ve tahminleri getir", type="primary"):
                 with st.spinner("Maçlar çekiliyor ve tahmin ediliyor…"):
                     try:
-                        gunler = 1 if gun_sec == "Bugün" else 7
                         tum_mac = []
-                        for i in range(gunler):
-                            g = datetime.date.today() + datetime.timedelta(days=i)
-                            mlar = gunun_maclari(tarih=g, lig_kodu=tahmin_lig)
-                            for _, m in mlar.iterrows():
-                                tum_mac.append({"tarih": g, "ev": m["Ev"], "dep": m["Dep"],
-                                                "saat": m["Saat"], "skor": m["Skor"]})
+                        mlar = gunun_maclari(tarih=secili_tarih, lig_kodu=tahmin_lig,
+                                             sadece_oynanmamis=True)
+                        for _, m in mlar.iterrows():
+                            tum_mac.append({"tarih": secili_tarih, "ev": m["Ev"], "dep": m["Dep"],
+                                            "saat": m["Saat"], "skor": m["Skor"]})
                         st.session_state["tahmin_maclar"] = tum_mac
                     except Exception as e:
                         st.error(f"Çekilemedi: {e}")
