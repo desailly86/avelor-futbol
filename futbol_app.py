@@ -16,6 +16,7 @@ from futbol_veri import (TUM_LIGLER, ANA_LIGLER, lig_verisi_cek, fikstur_cek,
                          sezon_etiketi)
 from futbol_tablo import puan_durumu, son_mac_sonuclari
 from futbol_bulten import gunun_maclari, hafta_ozeti, ESPN_SLUG, teshis
+import futbol_kayit as kayit
 from futbol_kriter import (takim_defteri, hakem_defteri, mac_tahmin_puan,
                            en_iyi_uc, agirlik_sozlugu, agirlik_durumu, MARKET_ETIKET,
                            kriter_karne, KRITER_TANIM, tahmin_isabeti)
@@ -159,20 +160,20 @@ if menu == "Dashboard":
     c3.markdown(f"<div class='kutu'><div class='etiket'>Kriter Havuzu</div>"
                 f"<div class='buyuk'>{len(KRITER_TANIM)}</div></div>", unsafe_allow_html=True)
     genel_isabet = None
-    if df is not None and len(df.dropna(subset=["FTHG"])) >= 3:
+    if API_URL:
         try:
-            rap = _isabet_hesapla(st.session_state["lig_kod"], len(df.dropna(subset=["FTHG"])))
-            genel_isabet = rap.get("_genel")
+            oz = kayit.ozet_oku(API_URL)
+            genel_isabet = oz.get("genel")
         except Exception:
             pass
-    if genel_isabet and genel_isabet["deneme"] > 0:
-        c4.markdown(f"<div class='kutu'><div class='etiket'>Tahmin İsabeti</div>"
+    if genel_isabet and genel_isabet.get("deneme", 0) > 0:
+        c4.markdown(f"<div class='kutu'><div class='etiket'>Tahmin İsabeti (kayıtlı)</div>"
                     f"<div class='buyuk'>%{genel_isabet['yuzde']}</div>"
                     f"<div class='etiket'>{genel_isabet['dogru']}/{genel_isabet['deneme']} tahmin</div></div>",
                     unsafe_allow_html=True)
     else:
-        c4.markdown(f"<div class='kutu'><div class='etiket'>Tahmin İsabeti</div>"
-                    f"<div class='buyuk' style='font-size:18px'>Veri az</div></div>", unsafe_allow_html=True)
+        c4.markdown(f"<div class='kutu'><div class='etiket'>Tahmin İsabeti (kayıtlı)</div>"
+                    f"<div class='buyuk' style='font-size:18px'>Henüz yok</div></div>", unsafe_allow_html=True)
     st.write("")
     if df is None:
         st.info("Başlamak için **Tahmin** ekranından bir lig seçip veriyi çekin. "
@@ -192,6 +193,107 @@ if menu == "Dashboard":
                              hide_index=True, use_container_width=True)
             else:
                 st.caption("Ağırlıklar henüz hesaplanmadı (veri az).")
+    st.write("")
+    # ---- Kalıcı tahmin kaydı (Google Sheets) ----
+    st.markdown("### 💾 Tahmin Kaydı")
+    if not API_URL:
+        st.info("Kalıcı kayıt için Google Sheets bağlantısı gerekli. Streamlit **Secrets**'a "
+                "`API_URL` eklenmemiş görünüyor. Eklersen tahminler kalıcı saklanır ve "
+                "isabet yüzden birikir.")
+    else:
+        kc1, kc2, kc3 = st.columns(3)
+        if kc1.button("🔌 Bağlantıyı test et"):
+            st.info(kayit.baglanti_testi(API_URL))
+        if kc2.button("📥 Bu haftanın tahminlerini kaydet", type="primary"):
+            if df is None:
+                st.warning("Önce Tahmin ekranından bir lig verisi çek.")
+            else:
+                with st.spinner("Bu haftanın maçları tahmin edilip kaydediliyor…"):
+                    try:
+                        # önümüzdeki 7 günün maçlarını ESPN'den al, tahmin et, kaydet
+                        defter = takim_defteri(df, df["Date"].max() + pd.Timedelta(days=1))
+                        hk = hakem_defteri(df, df["Date"].max() + pd.Timedelta(days=1))
+                        mevcut = [k for k in defter if not k.startswith("_")]
+                        def esle(ad):
+                            if ad in mevcut: return ad
+                            ilk = ad.split()[0].lower() if ad else ""
+                            for t in mevcut:
+                                if ilk and (ilk in t.lower() or t.lower().split()[0] in ad.lower()):
+                                    return t
+                            return None
+                        kayit_listesi = []
+                        for i in range(7):
+                            g = datetime.date.today() + datetime.timedelta(days=i)
+                            for _, mc in gunun_maclari(tarih=g, lig_kodu=st.session_state["lig_kod"]).iterrows():
+                                ev_e, dep_e = esle(mc["Ev"]), esle(mc["Dep"])
+                                if not ev_e or not dep_e or ev_e == dep_e:
+                                    continue
+                                t = mac_tahmin_puan(ev_e, dep_e, defter, hk, agirliklar=W)
+                                if not t:
+                                    continue
+                                for mk in MARKET_ETIKET:
+                                    if mk in t and isinstance(t[mk], (int, float)):
+                                        kayit_listesi.append({
+                                            "lig": st.session_state["lig_kod"],
+                                            "ev": mc["Ev"], "dep": mc["Dep"], "tarih": str(g),
+                                            "market": mk, "tahmin_yuzde": t[mk]})
+                        if kayit_listesi:
+                            sonuc = kayit.tahmin_kaydet(API_URL, kayit_listesi)
+                            if "eklenen" in sonuc:
+                                st.success(f"✅ {sonuc['eklenen']} yeni tahmin kaydedildi "
+                                           f"({len(kayit_listesi)} denendi, gerisi zaten kayıtlıydı).")
+                            else:
+                                st.error(f"Kayıt hatası: {sonuc}")
+                        else:
+                            st.info("Bu hafta kaydedilecek tahmin bulunamadı (maç yok ya da "
+                                    "takım eşleşmedi).")
+                    except Exception as e:
+                        st.error(f"Kayıt sırasında hata: {e}")
+        if kc3.button("✅ Oynanan maçların sonuçlarını güncelle"):
+            if df is None:
+                st.warning("Önce ligin güncel verisini çek (oynanmış maçlar için).")
+            else:
+                with st.spinner("Kayıtlı tahminler oynanan maçlarla eşleştiriliyor…"):
+                    try:
+                        okundu = kayit.kayitlari_oku(API_URL)
+                        kayitlar = okundu.get("kayitlar", [])
+                        oynanmis = df.dropna(subset=["FTHG", "FTAG"])
+                        sonuc_sozluk = {}
+                        for k in kayitlar:
+                            if k.get("tuttu") not in ("", None):
+                                continue  # zaten sonuçlanmış
+                            # bu tahmine ait maçı oynanmışlarda bul (ev/dep adıyla, gevşek)
+                            for _, m in oynanmis.iterrows():
+                                if (str(k["ev"]).split()[0].lower() in str(m["HomeTeam"]).lower() and
+                                    str(k["dep"]).split()[0].lower() in str(m["AwayTeam"]).lower()):
+                                    eh, ea = int(m["FTHG"]), int(m["FTAG"])
+                                    snc = "1" if eh>ea else ("X" if eh==ea else "2")
+                                    tp = eh+ea; kg = eh>0 and ea>0
+                                    mk = k["market"]
+                                    tuttu = None
+                                    if mk=="1": tuttu = snc=="1"
+                                    elif mk=="2": tuttu = snc=="2"
+                                    elif mk=="X": tuttu = snc=="X"
+                                    elif mk=="1X": tuttu = snc in ("1","X")
+                                    elif mk=="X2": tuttu = snc in ("X","2")
+                                    elif mk=="ust25": tuttu = tp>=3
+                                    elif mk=="alt25": tuttu = tp<=2
+                                    elif mk=="kg_var": tuttu = kg
+                                    elif mk=="kg_yok": tuttu = not kg
+                                    if tuttu is not None:
+                                        sonuc_sozluk[k["id"]] = {"sonuc": f"{eh}-{ea}", "tuttu": bool(tuttu)}
+                                    break
+                        if sonuc_sozluk:
+                            snc = kayit.sonuc_guncelle(API_URL, sonuc_sozluk)
+                            if "guncellenen" in snc:
+                                st.success(f"✅ {snc['guncellenen']} tahmin sonuçlandırıldı.")
+                            else:
+                                st.error(f"Güncelleme hatası: {snc}")
+                        else:
+                            st.info("Eşleşen yeni oynanmış maç bulunamadı.")
+                    except Exception as e:
+                        st.error(f"Güncelleme sırasında hata: {e}")
+
     st.write("")
     st.markdown("### 🗓️ Bugünün maçları")
     if st.button("Bugünün programını getir"):
@@ -450,9 +552,32 @@ elif menu == "Tahmin Karnesi":
     if df is None:
         st.info("Önce **Tahmin** ekranından ligi seçip veriyi çekin.")
     else:
+        # Önce kayıtlı (Google Sheets) özet — hızlı, biriken, tüm ligler
+        if API_URL:
+            oz = kayit.ozet_oku(API_URL)
+            g = oz.get("genel", {}) if isinstance(oz, dict) else {}
+            if g.get("deneme", 0) > 0:
+                st.success(f"💾 Kayıtlı karne (tüm kaydedilen tahminlerden, biriken): "
+                           f"**%{g['yuzde']}** — {g['dogru']}/{g['deneme']} tahmin")
+                mk = oz.get("market", {})
+                if mk:
+                    satir = [{"Tahmin Tipi": MARKET_ETIKET.get(m, m), "Doğru": v["dogru"],
+                              "Deneme": v["deneme"], "İsabet %": v["yuzde"]}
+                             for m, v in sorted(mk.items(), key=lambda x: -x[1]["yuzde"])]
+                    st.dataframe(pd.DataFrame(satir), hide_index=True, use_container_width=True)
+                st.caption("Bu tablo Dashboard'dan kaydettiğin tahminlerin gerçek sonuçlarından "
+                           "birikir. Maç oynandıkça 'sonuçları güncelle' deyince büyür.")
+                st.divider()
+                st.caption("Aşağıda ayrıca, yalnızca SEÇİLİ ligin anlık backtest'ini de görebilirsin "
+                           "(kayıt gerekmez ama yavaştır):")
+            else:
+                st.info("💾 Henüz kayıtlı sonuçlanmış tahmin yok. Dashboard'dan 'bu haftanın "
+                        "tahminlerini kaydet' → maçlar oynanınca 'sonuçları güncelle' dedikçe "
+                        "bu karne birikecek. Aşağıda seçili ligin anlık backtest'i var:")
+
         oynanmis = df.dropna(subset=["FTHG"])
         if len(oynanmis) == 0:
-            st.info("Bu ligde bu sezon henüz maç oynanmamış — karne için veri yok.")
+            st.info("Bu ligde bu sezon henüz maç oynanmamış — anlık backtest için veri yok.")
         else:
             if len(oynanmis) < 30:
                 st.warning(f"⚠️ Sadece {len(oynanmis)} maç var. Karne hesaplanacak ama az veriyle "
@@ -465,14 +590,23 @@ elif menu == "Tahmin Karnesi":
                 with st.spinner("Her maç geçmiş veriyle yeniden tahmin ediliyor…"):
                     rapor = _isabet_hesapla(st.session_state["lig_kod"], len(oynanmis))
                 genel = rapor.pop("_genel", {"deneme": 0, "dogru": 0, "yuzde": 0})
-                c1, c2, c3 = st.columns(3)
-                c1.metric("Genel isabet", f"%{genel['yuzde']}")
-                c2.metric("Doğru tahmin", genel["dogru"])
-                c3.metric("Toplam tahmin", genel["deneme"])
+                if genel["deneme"] == 0:
+                    st.error(f"Henüz tahmin üretilemedi. Toplam {genel.get('toplam_mac', '?')} maç var "
+                             f"ama tahmin için her iki takımın da daha önce en az 2 maçı olması gerekiyor. "
+                             "Sezonun ilk 2-3 haftasında takımlar yeni oynamaya başladığı için bu normaldir "
+                             "— birkaç hafta sonra tahminler üretilmeye başlar. Bu, veri gerçeğidir, hata değil.")
+                else:
+                    c1, c2, c3 = st.columns(3)
+                    c1.metric("Genel isabet", f"%{genel['yuzde']}")
+                    c2.metric("Doğru tahmin", genel["dogru"])
+                    c3.metric("Toplam tahmin", genel["deneme"])
+                    st.caption(f"({genel.get('toplam_mac','?')} maçın {genel.get('tahmin_edilebilen','?')} "
+                               "tanesine tahmin üretilebildi — gerisinde takımların geçmişi yetersizdi.)")
                 st.write("")
-                st.markdown("### Market market isabet (yüksekten düşüğe)")
-                st.caption("Sistem her maçta hangi marketleri 'önerdi' ve kaçı tuttu. "
-                           "En üsttekiler en güvenilir tahmin tiplerin.")
+                if genel["deneme"] > 0:
+                    st.markdown("### Market market isabet (yüksekten düşüğe)")
+                    st.caption("Sistem her maçta hangi marketleri 'önerdi' ve kaçı tuttu. "
+                               "En üsttekiler en güvenilir tahmin tiplerin.")
                 satirlar = []
                 for market, v in sorted(rapor.items(), key=lambda x: -x[1]["yuzde"]):
                     satirlar.append({"Tahmin Tipi": MARKET_ETIKET.get(market, market),
