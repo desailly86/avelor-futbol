@@ -147,21 +147,34 @@ def _saat_tsi(saat_metni) -> str:
         return ""
 
 
-def gunun_bulteni(sadece_kalan: bool = True, tsi_simdi: datetime.datetime | None = None) -> pd.DataFrame:
-    """Bugün oynanacak TÜM lig maçları, TSİ saatine göre sıralı.
-    sadece_kalan=True → şu andan sonra başlayacak maçlar (oynanmışlar gizlenir)."""
+def gunun_bulteni(sadece_kalan: bool = True, tsi_simdi: datetime.datetime | None = None,
+                  secili_gun=None) -> pd.DataFrame:
+    """Seçili günün (varsayılan bugün) TÜM lig maçları, TSİ saatine göre sıralı.
+    sadece_kalan=True → şu andan sonra başlayacak maçlar (yalnızca bugün için anlamlı).
+    secili_gun verilirse o günün maçları gösterilir (takvimden seçim)."""
     d = fikstur_cek(kod=None, sadece_gelecek=False)
     if d.empty or "Date" not in d.columns:
         return d
+    hedef = pd.Timestamp(secili_gun) if secili_gun else pd.Timestamp(datetime.date.today())
     bugun = pd.Timestamp(datetime.date.today())
-    d = d[d["Date"] == bugun].copy()
+    d = d[d["Date"] == hedef].copy()
     if d.empty:
         return d
     if "Saat_TSI" not in d.columns and "Time" in d.columns:
         d["Saat_TSI"] = d["Time"].map(_saat_tsi)
     d["Lig"] = d.get("Div", "").map(lambda k: TUM_LIGLER.get(k, k))
-    if sadece_kalan and "Saat_TSI" in d.columns:
+    if sadece_kalan and hedef == bugun and "Saat_TSI" in d.columns:
         simdi = (tsi_simdi or datetime.datetime.utcnow() + datetime.timedelta(hours=3)).strftime("%H:%M")
         d = d[d["Saat_TSI"].fillna("") >= simdi]
     sirala = "Saat_TSI" if "Saat_TSI" in d.columns else "Date"
     return d.sort_values(sirala).reset_index(drop=True)
+
+
+def fikstur_gunleri(ileri_gun: int = 14) -> pd.DataFrame:
+    """Önümüzdeki N günde hangi tarihlerde kaç maç var — takvim için özet."""
+    d = fikstur_cek(kod=None, sadece_gelecek=True)
+    if d.empty or "Date" not in d.columns:
+        return pd.DataFrame(columns=["Date", "mac_sayisi"])
+    bugun = pd.Timestamp(datetime.date.today())
+    d = d[d["Date"] <= bugun + pd.Timedelta(days=ileri_gun)]
+    return d.groupby("Date").size().reset_index(name="mac_sayisi")
