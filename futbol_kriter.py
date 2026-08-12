@@ -454,7 +454,7 @@ def agirlik_durumu(df: pd.DataFrame) -> dict:
             "aciklama": f"{oynanmis} maçtan öğrenildi; ağırlık etkisi {k}."}
 
 
-def tahmin_isabeti(df: pd.DataFrame, min_gecmis: int = 15) -> dict:
+def tahmin_isabeti(df: pd.DataFrame, min_gecmis: int = 3) -> dict:
     """Her maçı, yalnızca ONDAN ÖNCEKİ veriyle tahmin edip gerçekle kıyaslar.
     Market market isabet yüzdesi döndürür (MS1, 2.5 Üst, KG Var...).
     Bu, sistemin GERÇEK karnesidir — 'en çok hangi tahminimiz tutuyor' sorusunun cevabı.
