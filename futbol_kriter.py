@@ -404,14 +404,51 @@ def en_iyi_uc(t, bazlar=None):
     return secim
 
 
-def agirlik_sozlugu(df: pd.DataFrame, min_gecmis: int = 20) -> dict:
-    """Kriter karnesinden {kriter_kodu: ağırlık} üretir. Güvenilir olmayan
-    (az veri) kriterler 1.0 (nötr) kalır. Tahmin motoru bunu kullanır."""
+def agirlik_sozlugu(df: pd.DataFrame, min_gecmis: int = 8) -> dict:
+    """Kriter karnesinden {kriter_kodu: ağırlık} üretir. Oynanmış maçlardan
+    HEMEN başlar (8 maçtan itibaren), ama az veride ağırlık etkisi KADEMELİ:
+    - <8 maç: nötr (1.0), henüz güvenilmez
+    - 8-30 maç: ağırlık farkı %40 uygulanır (temkinli başlangıç)
+    - 30-80 maç: %70
+    - 80+ maç: tam (%100)
+    Böylece kriterler erken devreye girer ama sezon başında aşırı iddia etmez."""
+    oynanmis = len(df.dropna(subset=["FTHG"]))
+    if oynanmis < min_gecmis:
+        return {}
+    # kademeli güven katsayısı
+    if oynanmis < 30:
+        kademe = 0.40
+    elif oynanmis < 80:
+        kademe = 0.70
+    else:
+        kademe = 1.00
     karne = kriter_karne(df, min_gecmis=min_gecmis)
     ad_kod = {k[1]: k[0] for k in KRITER_TANIM}
     w = {}
     for _, r in karne.iterrows():
         kod = ad_kod.get(r["Kriter"])
-        if kod:
-            w[kod] = r["Ağırlık"] if r["Güvenilir mi"] == "✓" else 1.0
+        if not kod:
+            continue
+        if r["Deneme"] >= min_gecmis and r["Tutma %"] is not None:
+            ham_agirlik = r["Ağırlık"]  # 1.0 + fazlası
+            # kademeli: farkın bir kısmını uygula
+            w[kod] = round(1.0 + (ham_agirlik - 1.0) * kademe, 2)
+        else:
+            w[kod] = 1.0
     return w
+
+
+def agirlik_durumu(df: pd.DataFrame) -> dict:
+    """Ağırlıkların ne kadar olgunlaştığını özetler (app'te göstermek için)."""
+    oynanmis = len(df.dropna(subset=["FTHG"]))
+    if oynanmis < 8:
+        return {"durum": "Bekliyor", "kademe": "%0", "aciklama":
+                f"{oynanmis} maç oynandı — ağırlıklar için en az 8 maç gerekir.", "oynanmis": oynanmis}
+    if oynanmis < 30:
+        k = "%40 (temkinli)"
+    elif oynanmis < 80:
+        k = "%70 (gelişiyor)"
+    else:
+        k = "%100 (olgun)"
+    return {"durum": "Aktif", "kademe": k, "oynanmis": oynanmis,
+            "aciklama": f"{oynanmis} maçtan öğrenildi; ağırlık etkisi {k}."}
