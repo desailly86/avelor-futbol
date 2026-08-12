@@ -144,8 +144,15 @@ def mac_karti(ev, dep, t, tarih=""):
             for i, o in enumerate(oneriler))
     else:
         oneri_html = "<div class='etiket'>Lig tabanından yeterince sapan iddia yok</div>"
-    guven_not = ("<span style='background:#B00;color:#fff;padding:1px 8px;border-radius:4px;font-size:11px'>⚠ AZ VERİ</span> "
-                 if t.get("_guven") == "düşük" else "")
+    gv = t.get("_guven")
+    if gv == "veri_yok":
+        guven_not = ("<span style='background:#B00;color:#fff;padding:1px 8px;border-radius:4px;font-size:11px'>"
+                     "⚠ VERİ YOK · sadece varsayım</span> ")
+    elif gv == "düşük":
+        guven_not = ("<span style='background:#C80;color:#fff;padding:1px 8px;border-radius:4px;font-size:11px'>"
+                     "⚠ AZ VERİ</span> ")
+    else:
+        guven_not = ""
     st.markdown(f"<div class='mac'><div class='mac-ust'><b>{guven_not}{ev} — {dep}</b>"
                 f"<span class='etiket'>{tarih} · veri: {t.get('_ev_mac','?')}/{t.get('_dep_mac','?')} maç</span></div>"
                 f"<div class='olasilik' style='grid-template-columns:repeat(3,1fr)'>{oneri_html}</div></div>",
@@ -221,15 +228,19 @@ if menu == "Dashboard":
                 try:
                     ilerleme = st.empty()
                     toplam_kayit = []
+                    teshis_log = []  # her lig için ne oldu
                     lig_listesi = list(ANA_LIGLER.keys())
                     for li, lkod in enumerate(lig_listesi):
                         ilerleme.caption(f"({li+1}/{len(lig_listesi)}) {TUM_LIGLER[lkod]} işleniyor…")
                         # o ligin verisini çek + ağırlık
                         try:
                             veri = lig_verisi_cek(lkod, 1)
-                        except Exception:
+                        except Exception as ex:
+                            teshis_log.append(f"{TUM_LIGLER[lkod]}: veri indirilemedi ({ex})")
                             continue
-                        if veri.empty or len(veri.dropna(subset=["FTHG"])) == 0:
+                        oyn_say = len(veri.dropna(subset=["FTHG"])) if not veri.empty else 0
+                        if veri.empty or oyn_say == 0:
+                            teshis_log.append(f"{TUM_LIGLER[lkod]}: bu sezon oynanmış maç yok (henüz başlamamış)")
                             continue
                         wl = agirlik_sozlugu(veri)
                         defter = takim_defteri(veri, veri["Date"].max() + pd.Timedelta(days=1))
@@ -248,6 +259,10 @@ if menu == "Dashboard":
                             mlar = gunun_maclari(tarih=g, lig_kodu=lkod, sadece_oynanmamis=True)
                         except Exception:
                             mlar = pd.DataFrame()
+                        if mlar.empty:
+                            teshis_log.append(f"{TUM_LIGLER[lkod]}: {oyn_say} maç oynanmış ama BUGÜN maç yok")
+                            continue
+                        lig_kayit_once = len(toplam_kayit)
                         for _, mc in mlar.iterrows():
                             ev_e, dep_e = esle(mc["Ev"]), esle(mc["Dep"])
                             if not ev_e or not dep_e or ev_e == dep_e:
@@ -269,6 +284,9 @@ if menu == "Dashboard":
                                        f"({len(toplam_kayit)} denendi, gerisi zaten kayıtlıydı).")
                         else:
                             st.error(f"Kayıt hatası: {sonuc}")
+                        with st.expander("📋 Lig lig ne oldu? (neden bazı ligler kaydedilmedi)"):
+                            for satir in teshis_log:
+                                st.write(satir)
                     else:
                         ilerleme.empty()
                         st.info("Bu hafta hiçbir ligde kaydedilecek maç bulunamadı (maç yok ya da "
@@ -339,9 +357,9 @@ if menu == "Dashboard":
 
     st.write("")
     # ---- Haftanın en güçlü tahminleri (kayıtlı Sheet'ten okunur — hızlı) ----
-    st.markdown("### 🔝 Haftanın En Güçlü Tahminleri")
-    st.caption("Sheet'e kaydedilmiş tahminlerden en yüksek olasılıklılar. Önce yukarıdan "
-               "'tahminleri kaydet' demen gerekir; sonra bu liste anında gelir.")
+    st.markdown("### 🔝 Bugünün En Güçlü Tahminleri")
+    st.caption(f"Bugün ({tsi_bugun():%d.%m.%Y}) kaydedilmiş tahminlerden en yüksek olasılıklılar. "
+               "Önce yukarıdan 'BUGÜNKÜ tahminleri kaydet' demen gerekir.")
     if not API_URL:
         st.info("Kayıt bağlantısı yok — bu liste kayıtlı tahminlerden oluşur.")
     elif st.button("🔝 En güçlü tahminleri göster"):
@@ -349,10 +367,22 @@ if menu == "Dashboard":
             try:
                 okundu = kayit.kayitlari_oku(API_URL)
                 kayitlar = okundu.get("kayitlar", [])
-                # sadece HENÜZ sonuçlanmamış (yaklaşan) tahminler
-                bekleyen = [k for k in kayitlar if k.get("tuttu") in ("", None)]
+                bugun = tsi_bugun()
+                def _mac_gunu(k):
+                    # Sheets tarihi farklı formatlarda dönebilir → sadece YYYY-MM-DD kısmını al
+                    ham = str(k.get("tarih", "")).strip()
+                    return ham[:10]  # "2026-08-13T00:00:00Z" → "2026-08-13"
+                bugun_str = bugun.strftime("%Y-%m-%d")
+                # sadece MAÇ TARİHİ bugün olan ve henüz sonuçlanmamış tahminler
+                bekleyen = [k for k in kayitlar
+                            if k.get("tuttu") in ("", None)
+                            and _mac_gunu(k) == bugun_str]
                 if not bekleyen:
-                    st.info("Kayıtlı bekleyen (yaklaşan) tahmin yok. Önce 'tahminleri kaydet'.")
+                    # yardımcı: Sheet'te hangi maç tarihleri var, kullanıcı görsün
+                    tarihler = sorted(set(_mac_gunu(k) for k in kayitlar if k.get("tuttu") in ("", None)))
+                    ipucu = (" Kayıtlı bekleyen maç tarihleri: " + ", ".join(tarihler[:8])) if tarihler else ""
+                    st.info(f"Bugün ({bugun_str}) oynanacak kayıtlı tahmin yok. Önce 'BUGÜNKÜ "
+                            f"tahminleri kaydet' de.{ipucu}")
                 else:
                     dfh = pd.DataFrame(bekleyen)
                     dfh["Olasılık %"] = pd.to_numeric(dfh["tahmin_yuzde"], errors="coerce")
@@ -557,9 +587,10 @@ elif menu == "Tahmin":
     else:
         oynanmis = dft.dropna(subset=["FTHG"])
         if len(oynanmis) == 0:
-            st.warning("📭 Bu ligde bu sezon henüz maç oynanmamış — tahmin için veri yok. "
-                       "Sezon başladıktan sonra tekrar dene.")
-        else:
+            st.warning("📭 Bu ligde bu sezon henüz maç oynanmamış. Maçları yine de gösterebilirim, "
+                       "ama tahminler **hiçbir veriye dayanmaz** — sadece genel ev sahibi avantajı "
+                       "varsayımıdır. Gerçek tahmin için birkaç hafta maç oynanması gerekir.")
+        if True:
             # O ligin yaklaşan maçları (ESPN'den) + tahminleri
             st.markdown("### 📅 Yaklaşan maçlar ve tahminleri")
             secili_tarih = st.date_input("Hangi günün maçları?", value=tsi_bugun(),
@@ -598,18 +629,25 @@ elif menu == "Tahmin":
                     ev_e = eslesen(mc["ev"]); dep_e = eslesen(mc["dep"])
                     baslik = f"{mc['tarih']:%d.%m} {mc['saat']} · {mc['ev']} — {mc['dep']}"
                     if ev_e and dep_e and ev_e != dep_e:
-                        bulundu += 1
-                        t = mac_tahmin_puan(ev_e, dep_e, defter, hakem_defteri(dft, dft["Date"].max()+pd.Timedelta(days=1)),
+                        t = mac_tahmin_puan(ev_e, dep_e, defter,
+                                            hakem_defteri(dft, dft["Date"].max()+pd.Timedelta(days=1)),
                                             agirliklar=Wt)
-                        mac_karti(mc["ev"], mc["dep"], t, f"{mc['tarih']:%d.%m} {mc['saat']}")
+                        if t:
+                            bulundu += 1
+                            mac_karti(mc["ev"], mc["dep"], t, f"{mc['tarih']:%d.%m} {mc['saat']}")
+                        else:
+                            st.markdown(f"<div class='mac' style='padding:8px 14px'><b>{baslik}</b>"
+                                        f"<br><span class='etiket'>⚠ Takımlar eşleşti ama henüz maçları "
+                                        "yok — tahmin için en az 1 oynanmış maç gerekli.</span></div>",
+                                        unsafe_allow_html=True)
                     else:
-                        st.markdown(f"<div class='mac' style='padding:8px 14px'>{baslik}"
-                                    f"<br><span class='etiket'>⚠ Bu takımların bu sezon verisi henüz "
-                                    f"yok — tahmin üretilemedi (yeni çıkan takım ya da isim eşleşmedi)</span></div>",
+                        st.markdown(f"<div class='mac' style='padding:8px 14px'><b>{baslik}</b>"
+                                    f"<br><span class='etiket'>⚠ İsim eşleşmedi (yeni çıkan takım ya da "
+                                    "farklı yazım) — tahmin üretilemedi.</span></div>",
                                     unsafe_allow_html=True)
                 if bulundu == 0 and tm:
-                    st.info("Maçlar bulundu ama takım adları veri tabanıyla eşleşmedi. Bu genelde "
-                            "sezon çok yeniyken (takımların henüz maçı yok) olur.")
+                    st.info("Maçlar listelendi ama hiçbirine tahmin üretilemedi — takımların bu sezon "
+                            "henüz oynanmış maçı yok. Sezon ilerleyince bu ekran dolacak.")
             elif "tahmin_maclar" in st.session_state:
                 st.info("Seçili dönemde bu ligde maç bulunamadı.")
 
